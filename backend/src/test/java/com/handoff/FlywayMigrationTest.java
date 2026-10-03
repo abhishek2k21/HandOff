@@ -79,4 +79,61 @@ class FlywayMigrationTest extends AbstractIntegrationTest {
             jdbc.update("DELETE FROM events WHERE session_id = ? AND seq = 1",
                         sessionId));
     }
+
+    @Test
+    void duplicateApprovalRejected() {
+        // Enforces Rule R3 / schema constraint: only one approval row per (session_id, tool_call_id).
+        UUID sessionId = UUID.randomUUID();
+        UUID orgId = UUID.randomUUID();
+        UUID userId = UUID.randomUUID();
+
+        jdbc.update("""
+            INSERT INTO sessions (id, organization_id, ticket_id, agent_type, status,
+                                  last_seq, step_budget, token_budget, created_by)
+            VALUES (?, ?, 'T-3', 'SCRIPTED', 'RUNNING', 1, 20, 20000, ?)
+            """, sessionId, orgId, userId);
+
+        String toolCallId = "call_refund_123";
+        UUID approval1Id = UUID.randomUUID();
+        UUID approval2Id = UUID.randomUUID();
+
+        jdbc.update("""
+            INSERT INTO approvals (id, session_id, tool_call_id, status, expires_at)
+            VALUES (?, ?, ?, 'PENDING', now() + interval '5 minutes')
+            """, approval1Id, sessionId, toolCallId);
+
+        // A second approval request for the same tool call must be rejected by approvals_session_tool_uq
+        assertThrows(DataAccessException.class, () ->
+            jdbc.update("""
+                INSERT INTO approvals (id, session_id, tool_call_id, status, expires_at)
+                VALUES (?, ?, ?, 'PENDING', now() + interval '5 minutes')
+                """, approval2Id, sessionId, toolCallId));
+    }
+
+    @Test
+    void duplicateEventSeqRejected() {
+        // Enforces Rule R1: (session_id, seq) is unique with no duplicate seq permitted.
+        UUID sessionId = UUID.randomUUID();
+        UUID orgId = UUID.randomUUID();
+        UUID userId = UUID.randomUUID();
+
+        jdbc.update("""
+            INSERT INTO sessions (id, organization_id, ticket_id, agent_type, status,
+                                  last_seq, step_budget, token_budget, created_by)
+            VALUES (?, ?, 'T-4', 'SCRIPTED', 'RUNNING', 1, 20, 20000, ?)
+            """, sessionId, orgId, userId);
+
+        jdbc.update("""
+            INSERT INTO events (session_id, seq, type, actor_kind, actor_id, payload)
+            VALUES (?, 1, 'SESSION_STARTED', 'USER', ?, '{}')
+            """, sessionId, userId.toString());
+
+        // A second event with the exact same seq must violate the (session_id, seq) primary key
+        assertThrows(DataAccessException.class, () ->
+            jdbc.update("""
+                INSERT INTO events (session_id, seq, type, actor_kind, actor_id, payload)
+                VALUES (?, 1, 'AGENT_TEXT', 'AGENT', 'agent-1', '{"text":"hi"}')
+                """, sessionId));
+    }
 }
+
