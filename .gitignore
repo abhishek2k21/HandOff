@@ -1,0 +1,27 @@
+# Environment secrets
+.env
+
+# Java / Maven
+backend/target/
+*.class
+*.jar
+*.war
+
+# Maven wrapper downloaded distribution
+backend/.mvn/wrapper/maven-wrapper.jar
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
