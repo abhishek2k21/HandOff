@@ -17,12 +17,18 @@ docker compose up -d
 # 2. Start the backend (runs Flyway migrations on boot)
 cd backend
 ./mvnw spring-boot:run        # Linux / macOS
-mvnw.cmd spring-boot:run      # Windows
+.\mvnw.cmd spring-boot:run     # Windows PowerShell
+
+# If port 8080 is in use, override with SERVER_PORT:
+# $env:SERVER_PORT="8081"; .\mvnw.cmd spring-boot:run
 
 # 3. In another terminal — start the frontend
 cd frontend
 npm install
 npm run dev
+
+# If backend is on a non-default port, pass BACKEND_PORT:
+# $env:BACKEND_PORT="8081"; npm run dev
 ```
 
 Open **http://localhost:5173** to see the health dashboard.
