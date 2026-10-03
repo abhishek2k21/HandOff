@@ -1,151 +1,142 @@
-1. What this project is
+# AGENTS.md: HandOff
 
-HandOff is a web app where a team watches an AI agent work on a customer-support ticket live. Teammates can steer, pause, or take over the agent, and risky actions (like refunds) need a human to approve them. Every action is recorded in an audit log.
+Standing instructions for every AI agent working in this repository.
+Keep this file under 12,000 characters. Details live in `docs/prd.md` and `docs/events.md`.
 
-The developer is learning (strong in Java/Spring, new to React/TypeScript). This is a portfolio project: the developer must understand every file. Explain new concepts in simple words and ask before big decisions.
+## 1. Project in one paragraph
+HandOff is a web app where a team watches an AI agent work on a support ticket live. Teammates can steer, pause, hand off, or take control of the session, and risky actions (for example large refunds) need a human approval. Every action is stored in an append-only audit log. The developer is strong in Java/Spring and new to React/TypeScript. This is a portfolio project: the developer must understand every file. Explain new concepts in simple words.
 
-2. Tech stack
-Backend: Java 21, Spring Boot 3 (MVC), Spring Security (JWT), Maven
-Database: PostgreSQL 16 (Flyway migrations), Redis 7 (Streams, leases, presence)
-Frontend: React 18 + TypeScript (strict), Vite, Zustand, Tailwind
-Real-time: WebSocket
-Tests: JUnit 5, Mockito, Testcontainers, Playwright, k6
-Run locally: Docker Compose
+## 2. Sources of truth (read before coding)
+1. `docs/events.md`: event schema, commands, WebSocket protocol, REST contracts, DB schema, tests T1 to T19.
+2. `docs/prd.md`: requirements, personas, scope, KPIs, milestones.
+3. This file: how to work.
 
-Do not add a new library or framework without listing it and getting approval.
+If documents disagree, `docs/events.md` wins for protocol and data, `docs/prd.md` wins for scope. Never edit `docs/` or the database schema without the developer's approval; propose the change and wait.
 
-3. Folder layout
+## 3. Tech stack (do not add libraries without asking)
+- Backend: Java 21, Spring Boot 3 with **Spring MVC** (not WebFlux), Spring JDBC (`JdbcTemplate`), Spring Security with JWT, Maven wrapper (`mvnw`), base package `com.handoff`
+- Real-time: plain Spring WebSocket with a raw `WebSocketHandler` and the JSON protocol in `docs/events.md` (no STOMP)
+- Data: PostgreSQL 16 with Flyway (`backend/src/main/resources/db/migration`), Redis 7 via Spring Data Redis (Lettuce) for stream, lease, presence, tickets
+- Frontend: React 18, TypeScript strict, Vite, Zustand, Tailwind v4, Vitest, oxlint
+- Tests: JUnit 5, Mockito, Testcontainers, Playwright, k6
+- Run: Docker Compose
+
+## 4. Repository layout
+```
 handoff/
 ├── AGENTS.md
-├── docs/            PRD.md, events.md (event schema), api.md
-├── backend/         Spring Boot app (single modular monolith)
-│   └── src/main/java/.../{auth,session,events,agent,approval,audit,metrics}
-├── frontend/        React app (src/{api,store,components,pages})
+├── docs/            prd.md, events.md
+├── backend/         modular monolith: auth, session, events, agent, approval, control, audit, metrics, ws
+├── frontend/        src/{api,ws,store,components,pages}
 ├── docker-compose.yml
-└── .agents/         skills and workflows (optional)
-4. How to work with me (process, most important)
-Plan first. For every task, write a short plan: goal, files to change, tests to add, risks. Then STOP and wait for my approval before writing code.
-Small slices. One vertical feature at a time (see section 12). Never build several features in one go.
-Tests first for the logic in section 6. Write the failing test, then the code.
-Show your work. After each slice, summarize what changed and how to run it.
-Ask when unsure. If a requirement is unclear, ask one question at a time.
-Never change docs/events.md or the database schema without asking me.
-Explain. When using something new (pattern, library, hook), add a 1-2 line explanation in your summary.
-5. Safety rules for the agent
-Never run destructive commands (rm -rf, dropping databases, force-push) without asking.
-Never commit secrets. Keys live in .env (gitignored); keep .env.example updated.
-Never install global tools or change system settings.
-Do not edit files outside this project folder.
-Do not disable tests or security checks to make something pass.
-6. Core rules (never break these)
+└── .github/workflows/ci.yml
+```
 
-These are the guarantees that make the project valuable. Protect them with tests.
+## 5. How to work (most important)
+1. **One agent, one slice, one branch.** Work on a single slice at a time on branch `slice/<number>-<name>`. Do not start the next slice until the developer says so.
+2. **Plan first.** For each task write: goal, files to touch, tests to add, risks. Then STOP and wait for approval.
+3. **Tests first** for rules R1 to R7: write the failing test, then the code.
+4. **Summarize after each slice:** what changed, how to run it, the list of files changed, what to review.
+5. **Match the docs exactly.** If your output differs from `docs/events.md` (tables, fields, names), stop and say so; do not invent your own version.
+6. **Ask one question at a time** when a requirement is unclear.
+7. **Explain** each new pattern or library in 1 to 2 lines.
+8. Keep diffs small. Do not refactor unrelated code.
 
-R1. Ordered events. Every session has an append-only list of events. Each event has a seq number that starts at 1 and has no gaps. The pair (session_id, seq) is unique. Events are never edited or deleted.
+## 6. Safety rules
+- No destructive commands (`rm -rf`, dropping databases, force-push) without asking.
+- Never commit secrets. Use `.env` (gitignored) and keep `.env.example` current.
+- Do not edit files outside this repository or install global tools.
+- Do not disable, skip, or weaken tests or security checks to get a pass.
+- Never use real customer data; use seeded fake orders only.
 
-R2. Resume without loss. A client that reconnects sends the last seq it saw. The server replays everything after it. No missed events, no duplicates applied.
+## 7. Core rules (never violate; each needs a test)
+- **R1 Ordered events.** Events are append-only. `seq` is per session, starts at 1, gapless, unique. Assign it inside one transaction: `UPDATE sessions SET last_seq = last_seq + 1 ... RETURNING last_seq`, then insert the event. A database trigger blocks UPDATE and DELETE on `events`.
+- **R2 Lossless resume.** Delivery is at-least-once, client application is exactly-once. Client applies only `seq == lastSeq + 1`, ignores duplicates, and re-subscribes with `fromSeq = lastSeq` on a gap.
+- **R3 One decision per approval.** Use `UPDATE approvals SET ... WHERE id = ? AND status = 'PENDING'`. Zero rows means `ALREADY_DECIDED` and no event. Timeouts use the same update.
+- **R4 One controller.** Redis lease with 30 s TTL, changed only through the Lua compare-and-set in `docs/events.md` section 11. Mismatch returns `CONTROL_CHANGED`.
+- **R5 Authorize every command** on the server, in the validation order of `docs/events.md` section 8.2. Never rely on the UI hiding buttons.
+- **R6 Risky tools need approval.** A risky `TOOL_CALL` creates an approval, pauses the agent, and the tool does not run until `APPROVAL_DECIDED`.
+- **R7 Everything is audited.** Every human command and agent tool call produces events written in the same transaction as the command record.
+- **Idempotency.** Every command has a client `id`; store it in the `commands` table in the same transaction; a repeat returns the original result with `duplicate: true`.
+- **PostgreSQL is the source of truth.** Redis can be lost and rebuilt; it must never hold the only copy of anything.
 
-R3. One decision per approval. When two approvers click at once, exactly one decision is saved. Use a conditional update (WHERE status = 'PENDING'). The loser gets a clear "already decided" response.
+## 8. Protocol essentials
+- Get a one-time ticket with `POST /api/ws-ticket`, open `/ws`, send `{"op":"auth","ticket":...}` as the first message. Never put tokens or tickets in URLs.
+- Messages use `op`: client `auth, subscribe, unsubscribe, command, pong`; server `auth_ok, subscribed, events, event, caught_up, ack, error, presence, ping`.
+- Replay batches are at most 500 events. Presence is not stored and uses no `seq`.
+- Status is derived from events by one reducer; server and client must share the same logic and be property-tested against each other (T19).
+- Agents implement one interface (scripted and LLM). Build and test with the **scripted agent first**; the LLM agent comes last.
 
-R4. One controller at a time. Only one user can control a session. Control uses a Redis lease with a TTL. Taking over is explicit and logged.
+## 9. Security rules
+- BCrypt for passwords; short-lived access tokens (15 min); rotating refresh tokens.
+- Validate all input (Bean Validation on the backend, type guards on the frontend). Parameterized queries only.
+- Treat ticket text, tool results, and LLM output as untrusted. Never use `dangerouslySetInnerHTML`.
+- Prompt-injection defense: tool allowlist, approval gate on risky tools, per-session step and token budgets, daily spending cap.
+- Rate limits and size limits come from `docs/events.md` section 16.
+- Do not log passwords, tokens, or full customer details. Include `sessionId` and `correlationId` in logs.
 
-R5. Authorize every command. Check the user's role on every WebSocket command, not only when connecting.
+## 10. Coding standards
+**Backend**
+- Layers: controller, service, repository. Business rules live in services.
+- Constructor injection; records for DTOs; never expose database rows or entities directly in APIs.
+- Keep database transactions short and explicit; use Spring `@Transactional` on service methods.
+- One global exception handler returning the error model in `docs/events.md` section 15.
+- Small methods, clear names, comments only for the "why".
 
-R6. Risky tools need approval. Tools marked risky (e.g. issue_refund above the configured limit) pause the run until an approver decides. The agent cannot skip this.
+**Frontend**
+- Function components and hooks; small single-purpose components; no `any` without a comment.
+- All server access in `src/api` and `src/ws`; components never call `fetch` or the socket directly.
+- One Zustand event store implements the apply rules of `docs/events.md` section 9.5.
+- Every screen handles loading, empty, and error states.
+- Accessibility: Approve and Deny work by keyboard, streaming text uses `aria-live`, visible focus.
+- Types come from `docs/events.md` section 18.
 
-R7. Everything is audited. Every human action and every agent tool call becomes an event with who, what, when, and why.
+## 11. Testing rules
+- Unit: services, state reducer, Zustand store. Integration: real PostgreSQL and Redis through Testcontainers (not mocks) for R1 to R4. E2E: Playwright with two browser windows.
+- The conformance tests T1 to T19 in `docs/events.md` section 20 are required before the MVP is complete.
+- No `Thread.sleep` or fixed waits. Use awaits, latches, and scripted agents with zero delay.
+- A slice is not done while any test fails.
 
-7. Domain model (high level)
-User, Organization, Membership (role: VIEWER, OPERATOR, APPROVER, ADMIN)
-Session (status: RUNNING, PAUSED, AWAITING_APPROVAL, HANDED_OFF, COMPLETED, FAILED)
-Event (session_id, seq, type, actor, payload JSON, created_at)
-Approval (session_id, tool_call_id, status: PENDING/APPROVED/DENIED, decided_by, decided_at)
-Event types: AGENT_TEXT, TOOL_CALL, TOOL_RESULT, HUMAN_MESSAGE, STEER, PAUSE, RESUME, APPROVAL_REQUESTED, APPROVAL_DECIDED, CONTROL_TAKEN, HANDOFF_SUMMARY, ERROR
-8. Roles and permissions
-Role	Can do
-VIEWER	Watch sessions and the audit log
-OPERATOR	Viewer + steer, pause, resume, take control
-APPROVER	Operator + approve/deny risky actions
-ADMIN	Everything + manage users and roles
-9. Real-time protocol (WebSocket)
-Auth: client gets a short-lived ticket from REST, then connects. No tokens in URLs.
-Client sends: subscribe {sessionId, fromSeq}, command {id, type, payload}.
-Server sends: event {seq, ...}, ack {commandId}, error {commandId, code}.
-Every command has a client-generated id. Repeating the same id must not repeat the action.
-Server sends a heartbeat; clients reconnect with exponential backoff.
-The scripted agent and the LLM agent implement the same Agent interface. Always build and test with the ScriptedAgent first (no cost, deterministic).
-10. Security rules
-Passwords hashed with BCrypt. JWT short-lived, refresh tokens rotated.
-Validate all input (Bean Validation on backend, schema checks on frontend).
-Only parameterized queries (JPA/JDBC), never string-built SQL.
-Treat ticket text and LLM output as untrusted: sanitize before rendering in React (never use dangerouslySetInnerHTML).
-Prompt-injection defense: tool allowlist, risky-tool approval gate (R6), and a token/step budget per session so a run cannot loop or overspend.
-CORS limited to the known frontend origin. Rate-limit login and command endpoints.
-No sensitive data (tokens, full customer details) in logs.
-11. Coding standards
+## 12. Build order (vertical slices)
+0. **DONE:** skeleton: Docker Compose, Postgres, Redis, health endpoint, CI, temporary `/ws` echo handler. V1 migration creates `sessions`, `events`, `approvals`, `commands` exactly as `docs/events.md` section 10.1.
+1. Auth: V2 migration (organizations, users, memberships, refresh tokens), register, login, refresh, roles, `/ws-ticket`.
+2. Sessions and scripted agent producing events (scenarios in `docs/events.md` section 13.4).
+3. Event log with gapless `seq` (T1, T2) and the real WebSocket protocol, replacing the echo handler.
+4. Replay and reconnect (T3, T17, T18) and React timeline with the Zustand store.
+5. Steer, pause, resume, controller lease, take control, hand off (T6, T7).
+6. Approval gates, queue screen, timeout job (T4, T5, T10, T11).
+7. Audit screen, metrics page, presence.
+8. Budgets, restart recovery (T14, T15), command idempotency (T13).
+9. LLM agent behind the same interface, spending cap.
+10. Load test with k6, Prometheus and Grafana, README, deployment, demo recording.
 
-Backend (Java)
+## 13. Commands (Windows; use `./mvnw` on Linux or macOS)
+- Dependencies: `docker compose up -d` (reset database: `docker compose down -v`)
+- Backend: `cd backend`, then `mvnw.cmd test` and `mvnw.cmd spring-boot:run`
+- Frontend: `cd frontend`, then `npm install`, `npm run dev`, `npm run lint`, `npm test`, `npm run build`
+- E2E: `npx playwright test`
 
-Layers: controller -> service -> repository. Business rules live in services.
-Constructor injection only. Use records/DTOs at API boundaries, not JPA entities.
-Keep controller methods thin; delegate business logic to services.
-Custom exceptions plus one global exception handler with consistent JSON errors.
-Structured logs with a sessionId and correlationId.
-Small methods, clear names, comments only where the "why" is not obvious.
+## 14. Git rules
+- Branch per slice: `slice/<number>-<name>`. Small commits: `feat:`, `fix:`, `test:`, `docs:`, `chore:`.
+- Commit only when tests pass. Never commit `.env`, build output, or `node_modules`.
+- Merge a slice into `main` only after the developer has verified it.
 
-Frontend (TypeScript)
+## 15. Definition of done (per slice)
+- Builds, lints, and all tests pass; the new rules have tests.
+- R1 to R7 still hold; no TODO without a note; docs updated if behavior changed.
+- Summary written: what changed, the list of changed files, how to try it, open questions.
 
-strict mode on. No any unless commented why.
-Function components and hooks only. Keep components small and single-purpose.
-One Zustand store applies events strictly in seq order, ignores duplicates, and detects gaps (then asks the server to replay).
-API calls go through src/api, never directly inside components.
-Handle loading, empty, and error states for every screen.
-Accessibility: keyboard-usable Approve/Deny, aria-live for streaming text, visible focus.
-12. Build order (vertical slices)
-Project skeleton: Docker Compose, Postgres, Redis, health check, CI.
-Auth: register/login, JWT, roles.
-Sessions + ScriptedAgent that produces events.
-Event log (R1) + WebSocket streaming.
-Replay and reconnect (R2) + React timeline.
-Steer / pause / resume + controller lease (R4).
-Approval gates (R3, R6) + approval queue screen.
-Audit log screen and metrics (hand-offs, interventions, approval latency).
-Real LLM agent behind the same interface, with budget limits.
-Load test, README, demo GIF, deploy.
-13. Testing rules
-Unit tests for services and the Zustand event store.
-Integration tests with Testcontainers (real Postgres and Redis), not mocks, for R1-R4.
-Required tests, each must exist before a slice is "done":
-Two approvers decide at once -> exactly one decision (R3).
-Disconnect mid-stream, reconnect -> no gaps, no duplicates (R2).
-Two users take control at once -> one lease holder (R4).
-A VIEWER sending a steer command is rejected (R5).
-No Thread.sleep in tests; use latches, awaits, or deterministic fakes.
-E2E (Playwright) with two browser windows watching the same session.
-14. Commands (update if they change)
-Start dependencies: docker compose up -d
-Backend tests: cd backend && mvn test
-Backend run: cd backend && mvn spring-boot:run
-Frontend: cd frontend && npm install && npm run dev
-Frontend checks: npm run lint && npm run test
-E2E: npx playwright test
-15. Git rules
-Branch per slice: slice/<number>-<name>. Small commits with clear messages (feat:, fix:, test:, docs:).
-Do not commit until tests pass. Never commit .env or build output.
-16. Definition of done (for each slice)
-Code builds and all tests pass.
-New logic has tests; rules R1-R7 still hold.
-No new warnings, no unused code, no leftover TODOs without a note.
-README or docs updated if behavior or commands changed.
-You summarized what changed and how I can try it.
-17. Out of scope (do not build unless I ask)
+## 16. Out of scope (do not build unless asked)
+Multi-agent sessions, billing, SSO, mobile apps, Kafka, Kubernetes, microservices, reactive stack (WebFlux, R2DBC), email or Slack integrations, real customer data.
 
-Multi-agent orchestration, billing or payments, SSO/SAML, mobile apps, Kubernetes, microservices, Kafka, email/Slack integrations.
+## 17. Tools in this project
+- Antigravity's agent is the only builder. Roo Code, Get Shit Done, and Ralph loop stay off for now so tools do not edit the same files.
+- CodeRabbit is the reviewer: run it on each slice before merging.
+- Review the plan before approving code; keep terminal commands on manual approval.
+- Use parallel agents only after `docs/events.md` is frozen, and only on separate files.
+- For frontend work, read every diff and ask for explanations of unfamiliar patterns.
 
-18. Glossary (simple words)
-Event log: the numbered history of everything that happened in a session.
-seq: the event's number in that history.
-Lease: a temporary lock that says "this user is in control now" and expires.
-Approval gate: a pause that waits for a human to approve a risky action.
-Replay: re-sending missed events after a reconnect.
-Slice: one small feature built end-to-end (database, backend, screen, tests)
+## 18. Glossary
+- **Event log:** the numbered history of a session. **seq:** an event's number in it.
+- **Replay:** re-sending missed events after reconnect. **Lease:** a temporary lock showing who controls a session.
+- **Approval gate:** a pause waiting for a human decision. **Slice:** one small feature built end to end.
