@@ -1,76 +1,135 @@
 import { useEffect, useState } from 'react';
 import { fetchHealth, type HealthResponse } from './api/health';
+import { LoginPage } from './pages/LoginPage';
+import { RegisterPage } from './pages/RegisterPage';
+import { useAuthStore } from './store/auth';
 
-/**
- * Main App component — shows the backend health status.
- *
- * It handles three states (per AGENTS.md §11 — frontend standards):
- * 1. Loading:  a spinner while we wait for /api/health
- * 2. Success:  green/red indicators for backend, database, and redis
- * 3. Error:    a message if the backend is unreachable
- */
 function App() {
-  // useState<T | null>(null) means "we don't have the data yet."
-  const [health, setHealth] = useState<HealthResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+  const user = useAuthStore((s) => s.user);
+  const authStatus = useAuthStore((s) => s.status);
+  const logout = useAuthStore((s) => s.logout);
+  const restoreSession = useAuthStore((s) => s.restoreSession);
 
-  // useEffect runs once when the component first appears on screen.
-  // We fetch the health data here.
+  const [authView, setAuthView] = useState<'login' | 'register'>('login');
+  const [health, setHealth] = useState<HealthResponse | null>(null);
+  const [healthError, setHealthError] = useState<string | null>(null);
+  const [healthLoading, setHealthLoading] = useState(true);
+
+  // Restore session from localStorage on initial app load
   useEffect(() => {
-    let cancelled = false; // prevents setting state after unmount
+    restoreSession();
+  }, [restoreSession]);
+
+  // Fetch health status
+  useEffect(() => {
+    let cancelled = false;
 
     fetchHealth()
       .then((data) => {
         if (!cancelled) {
           setHealth(data);
-          setError(null);
+          setHealthError(null);
         }
       })
       .catch((err: unknown) => {
         if (!cancelled) {
           const message = err instanceof Error ? err.message : 'Unknown error';
-          setError(message);
+          setHealthError(message);
         }
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) setHealthLoading(false);
       });
 
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   return (
-    <div className="min-h-screen bg-gray-950 text-gray-100 flex items-center justify-center p-4">
-      <div className="w-full max-w-md">
-        {/* Header */}
-        <div className="text-center mb-8">
+    <div className="min-h-screen bg-gray-950 text-gray-100 flex flex-col items-center justify-center p-4 selection:bg-indigo-500 selection:text-white">
+      <div className="w-full max-w-md space-y-6">
+        {/* Brand Header */}
+        <header className="text-center">
           <h1 className="text-3xl font-bold tracking-tight bg-gradient-to-r from-indigo-400 to-cyan-400 bg-clip-text text-transparent">
             HandOff
           </h1>
           <p className="text-gray-400 mt-1 text-sm">
             AI Agent Supervision Platform
           </p>
-        </div>
+        </header>
 
-        {/* Health card */}
+        {/* Auth Loading State */}
+        {authStatus === 'loading' && (
+          <div className="rounded-2xl border border-gray-800 bg-gray-900/60 backdrop-blur-sm p-8 text-center">
+            <div className="inline-block h-6 w-6 animate-spin rounded-full border-2 border-indigo-400 border-t-transparent" />
+            <p className="mt-3 text-sm text-gray-400">Loading session…</p>
+          </div>
+        )}
+
+        {/* Anonymous: Show Login or Register */}
+        {authStatus === 'anonymous' && (
+          <>
+            {authView === 'login' ? (
+              <LoginPage onNavigateToRegister={() => setAuthView('register')} />
+            ) : (
+              <RegisterPage onNavigateToLogin={() => setAuthView('login')} />
+            )}
+          </>
+        )}
+
+        {/* Authenticated User Dashboard */}
+        {authStatus === 'authenticated' && user && (
+          <div className="rounded-2xl border border-gray-800 bg-gray-900/60 backdrop-blur-sm shadow-xl p-6">
+            <div className="flex items-center justify-between pb-5 border-b border-gray-800">
+              <div>
+                <p className="text-xs uppercase tracking-wider font-semibold text-gray-400">
+                  Signed In
+                </p>
+                <div className="mt-1 flex items-center gap-2">
+                  <span className="text-base font-medium text-white">{user.name}</span>
+                  <span className="rounded bg-indigo-950/80 border border-indigo-800 px-2 py-0.5 text-xs font-semibold text-indigo-300">
+                    {user.role}
+                  </span>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => logout()}
+                className="rounded-lg border border-gray-700 bg-gray-800/80 px-3 py-1.5 text-xs font-medium text-gray-300 hover:bg-gray-700 hover:text-white transition-colors cursor-pointer"
+              >
+                Log Out
+              </button>
+            </div>
+
+            <div className="mt-4 text-xs text-gray-400">
+              <p>
+                Logged in as <strong className="text-gray-200">{user.name}</strong> ({user.role})
+              </p>
+              <p className="mt-1 font-mono text-[11px] text-gray-500 truncate">
+                Org ID: {user.organizationId}
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* System Health Card (Visible in all states) */}
         <div className="rounded-2xl border border-gray-800 bg-gray-900/60 backdrop-blur-sm shadow-xl p-6">
           <h2 className="text-sm font-semibold uppercase tracking-wider text-gray-400 mb-4">
             System Health
           </h2>
 
-          {loading && (
+          {healthLoading && (
             <div className="flex items-center gap-3 text-gray-400">
-              {/* Simple CSS spinner */}
               <div className="h-5 w-5 animate-spin rounded-full border-2 border-gray-600 border-t-indigo-400" />
               <span>Checking health…</span>
             </div>
           )}
 
-          {error && (
+          {healthError && (
             <div className="rounded-lg bg-red-950/50 border border-red-800 p-4 text-red-300 text-sm">
               <p className="font-medium">Cannot reach the backend</p>
-              <p className="mt-1 text-red-400 text-xs">{error}</p>
+              <p className="mt-1 text-red-400 text-xs">{healthError}</p>
               <button
                 onClick={() => window.location.reload()}
                 className="mt-3 text-xs font-medium text-red-200 underline underline-offset-2 hover:text-white transition-colors cursor-pointer"
@@ -82,23 +141,22 @@ function App() {
 
           {health && (
             <div className="space-y-3">
-              <StatusRow label="Backend"  value={health.status}   />
+              <StatusRow label="Backend" value={health.status} />
               <StatusRow label="Database" value={health.database} />
-              <StatusRow label="Redis"    value={health.redis}    />
+              <StatusRow label="Redis" value={health.redis} />
             </div>
           )}
         </div>
 
-        {/* Version */}
-        <p className="text-center text-xs text-gray-600 mt-6">
-          Slice 0 · Skeleton
-        </p>
+        {/* Footer info */}
+        <footer className="text-center text-xs text-gray-600">
+          Slice 1 · Authentication
+        </footer>
       </div>
     </div>
   );
 }
 
-/** Small reusable row showing a label and an UP / DOWN badge. */
 function StatusRow({ label, value }: { label: string; value: string }) {
   const isUp = value === 'UP';
   return (

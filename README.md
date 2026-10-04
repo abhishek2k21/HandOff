@@ -62,4 +62,13 @@ handoff/
 
 ## Current Slice
 
-**Slice 0 — Project Skeleton**: Docker Compose, health endpoint, Flyway migration, frontend health dashboard, WebSocket echo, CI.
+**Slice 1 — Authentication & Roles**:
+- Backend: Flyway V2 migration, JWT authentication, BCrypt, role-based access, token rotation & reuse detection, Redis-backed rate limiting, and single-use WebSocket tickets.
+- Frontend: Zustand auth store with memory-only access token, persistent refresh token in `localStorage`, single-flight refresh in-tab, Web Locks API coordination across browser tabs, and accessible login/register screens.
+
+### Auth Token Architecture & Multi-Tab Behavior
+- **Access Token:** Stored in memory only (inside the Zustand auth store). Never persisted to `localStorage` or `sessionStorage` to mitigate token exfiltration via XSS.
+- **Refresh Token:** Stored in `localStorage` (`handoff_refresh_token`) to allow session restoration across browser reloads.
+- **In-Tab Single-Flight:** A module-level in-flight promise ensures that multiple concurrent 401s or effect re-renders in the same tab share a single `/api/auth/refresh` network call.
+- **Multi-Tab Web Lock Coordination:** Because refresh tokens rotate on every use and token reuse revokes the entire user token family, concurrent refreshes across multiple tabs in the same browser are serialized using the Web Locks API (`navigator.locks.request("handoff-refresh", ...)`). Inside the lock, the tab re-checks `localStorage` and uses the newly rotated token if another tab already completed a refresh, preventing stale token reuse and accidental logouts.
+
