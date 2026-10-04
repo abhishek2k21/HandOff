@@ -709,6 +709,15 @@ Base path `/api`. JSON bodies. Authenticated endpoints require `Authorization: B
 
 ### 14.2 Key Contracts
 
+**POST /auth/register**
+```json
+// request
+{ "email": "maya@example.com", "password": "Password123!", "displayName": "Maya", "organizationName": "Acme Support" }
+// 201 response
+{ "accessToken": "<jwt>", "refreshToken": "<opaque>", "expiresInSeconds": 900,
+  "user": { "id": "<uuid>", "name": "Maya", "role": "ADMIN", "organizationId": "<uuid>" } }
+```
+
 **POST /auth/login**
 ```json
 // request
@@ -716,6 +725,22 @@ Base path `/api`. JSON bodies. Authenticated endpoints require `Authorization: B
 // 200 response
 { "accessToken": "<jwt>", "refreshToken": "<opaque>", "expiresInSeconds": 900,
   "user": { "id": "<uuid>", "name": "Maya", "role": "OPERATOR", "organizationId": "<uuid>" } }
+```
+
+**POST /auth/refresh**
+```json
+// request
+{ "refreshToken": "<opaque>" }
+// 200 response
+{ "accessToken": "<jwt>", "refreshToken": "<opaque>", "expiresInSeconds": 900,
+  "user": { "id": "<uuid>", "name": "Maya", "role": "OPERATOR", "organizationId": "<uuid>" } }
+```
+
+**POST /auth/logout**
+```json
+// request
+{ "refreshToken": "<opaque>" }
+// 204 No Content
 ```
 
 **POST /ws-ticket**

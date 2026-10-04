@@ -1,0 +1,3 @@
+handoff:
+  jwt:
+    secret: ${JWT_SECRET:dev-secret-key-must-be-at-least-32-bytes-long-for-hs256!}

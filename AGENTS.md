@@ -17,7 +17,7 @@ If documents disagree, `docs/events.md` wins for protocol and data, `docs/prd.md
 - Backend: Java 21, Spring Boot 3 with **Spring MVC** (not WebFlux), Spring JDBC (`JdbcTemplate`), Spring Security with JWT, Maven wrapper (`mvnw`), base package `com.handoff`
 - Real-time: plain Spring WebSocket with a raw `WebSocketHandler` and the JSON protocol in `docs/events.md` (no STOMP)
 - Data: PostgreSQL 16 with Flyway (`backend/src/main/resources/db/migration`), Redis 7 via Spring Data Redis (Lettuce) for stream, lease, presence, tickets
-- Frontend: React 18, TypeScript strict, Vite, Zustand, Tailwind v4, Vitest, oxlint
+- Frontend: React 19, TypeScript strict, Vite, Zustand, Tailwind v4, Vitest, oxlint
 - Tests: JUnit 5, Mockito, Testcontainers, Playwright, k6
 - Run: Docker Compose
 

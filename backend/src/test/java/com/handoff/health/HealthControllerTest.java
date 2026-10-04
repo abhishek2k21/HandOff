@@ -23,7 +23,15 @@ import org.springframework.test.web.servlet.MockMvc;
  *
  * This is faster than an integration test — good for quick feedback.
  */
+import org.springframework.context.annotation.Import;
+import com.handoff.auth.SecurityConfig;
+import com.handoff.auth.JwtAuthenticationFilter;
+import com.handoff.auth.RestAuthenticationEntryPoint;
+import com.handoff.auth.RestAccessDeniedHandler;
+import com.handoff.common.CorrelationIdFilter;
+
 @WebMvcTest(HealthController.class)
+@Import({SecurityConfig.class, CorrelationIdFilter.class, RestAuthenticationEntryPoint.class, RestAccessDeniedHandler.class, JwtAuthenticationFilter.class})
 class HealthControllerTest {
 
     @Autowired

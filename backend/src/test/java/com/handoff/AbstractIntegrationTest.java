@@ -43,5 +43,16 @@ public abstract class AbstractIntegrationTest {
         registry.add("spring.datasource.password", POSTGRES::getPassword);
         registry.add("spring.data.redis.host", REDIS::getHost);
         registry.add("spring.data.redis.port", () -> REDIS.getMappedPort(6379));
+        registry.add("handoff.jwt.secret", () -> "test-secret-key-must-be-at-least-32-bytes-long-for-testing!");
+    }
+
+    @org.junit.jupiter.api.BeforeEach
+    void setUpTestRestTemplate(
+            @org.springframework.beans.factory.annotation.Autowired(required = false)
+            org.springframework.boot.test.web.client.TestRestTemplate restTemplate
+    ) {
+        if (restTemplate != null) {
+            restTemplate.getRestTemplate().setRequestFactory(new org.springframework.http.client.JdkClientHttpRequestFactory());
+        }
     }
 }

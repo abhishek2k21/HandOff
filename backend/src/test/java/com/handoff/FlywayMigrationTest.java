@@ -4,15 +4,14 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.util.UUID;
-
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 /**
- * Verifies that Flyway ran successfully and the V1 migration created
- * the expected tables and trigger.
+ * Verifies that Flyway ran successfully and created V1 and V2 tables,
+ * triggers, and foreign key constraints.
  */
 class FlywayMigrationTest extends AbstractIntegrationTest {
 
@@ -20,10 +19,12 @@ class FlywayMigrationTest extends AbstractIntegrationTest {
     private JdbcTemplate jdbc;
 
     @Test
-    void allFourTablesExist() {
-        // information_schema.tables lists every table in the database.
-        // We query it once per expected table.
-        for (String table : new String[]{"sessions", "events", "approvals", "commands"}) {
+    void allTablesExist() {
+        String[] expectedTables = {
+            "sessions", "events", "approvals", "commands",
+            "organizations", "users", "memberships", "refresh_tokens"
+        };
+        for (String table : expectedTables) {
             Integer count = jdbc.queryForObject(
                     "SELECT COUNT(*) FROM information_schema.tables "
                     + "WHERE table_schema = 'public' AND table_name = ?",
@@ -33,12 +34,25 @@ class FlywayMigrationTest extends AbstractIntegrationTest {
     }
 
     @Test
-    void eventsCannotBeUpdated() {
-        // Insert a session and an event, then try to UPDATE the event.
-        // The trigger should block it.
+    void sessionWithUnknownOrganizationIsRejected() {
         UUID sessionId = UUID.randomUUID();
-        UUID orgId = UUID.randomUUID();
-        UUID userId = UUID.randomUUID();
+        UUID nonExistentOrgId = UUID.randomUUID();
+        UUID userId = createTestUser();
+
+        // Foreign key constraint fk_sessions_organization must reject this insert
+        assertThrows(DataAccessException.class, () ->
+            jdbc.update("""
+                INSERT INTO sessions (id, organization_id, ticket_id, agent_type, status,
+                                      last_seq, step_budget, token_budget, created_by)
+                VALUES (?, ?, 'T-FK', 'SCRIPTED', 'RUNNING', 1, 20, 20000, ?)
+                """, sessionId, nonExistentOrgId, userId));
+    }
+
+    @Test
+    void eventsCannotBeUpdated() {
+        UUID orgId = createTestOrg();
+        UUID userId = createTestUser();
+        UUID sessionId = UUID.randomUUID();
 
         jdbc.update("""
             INSERT INTO sessions (id, organization_id, ticket_id, agent_type, status,
@@ -59,10 +73,9 @@ class FlywayMigrationTest extends AbstractIntegrationTest {
 
     @Test
     void eventsCannotBeDeleted() {
-        // Same setup: insert, then try DELETE.
+        UUID orgId = createTestOrg();
+        UUID userId = createTestUser();
         UUID sessionId = UUID.randomUUID();
-        UUID orgId = UUID.randomUUID();
-        UUID userId = UUID.randomUUID();
 
         jdbc.update("""
             INSERT INTO sessions (id, organization_id, ticket_id, agent_type, status,
@@ -82,10 +95,9 @@ class FlywayMigrationTest extends AbstractIntegrationTest {
 
     @Test
     void duplicateApprovalRejected() {
-        // Enforces Rule R3 / schema constraint: only one approval row per (session_id, tool_call_id).
+        UUID orgId = createTestOrg();
+        UUID userId = createTestUser();
         UUID sessionId = UUID.randomUUID();
-        UUID orgId = UUID.randomUUID();
-        UUID userId = UUID.randomUUID();
 
         jdbc.update("""
             INSERT INTO sessions (id, organization_id, ticket_id, agent_type, status,
@@ -112,10 +124,9 @@ class FlywayMigrationTest extends AbstractIntegrationTest {
 
     @Test
     void duplicateEventSeqRejected() {
-        // Enforces Rule R1: (session_id, seq) is unique with no duplicate seq permitted.
+        UUID orgId = createTestOrg();
+        UUID userId = createTestUser();
         UUID sessionId = UUID.randomUUID();
-        UUID orgId = UUID.randomUUID();
-        UUID userId = UUID.randomUUID();
 
         jdbc.update("""
             INSERT INTO sessions (id, organization_id, ticket_id, agent_type, status,
@@ -135,5 +146,19 @@ class FlywayMigrationTest extends AbstractIntegrationTest {
                 VALUES (?, 1, 'AGENT_TEXT', 'AGENT', 'agent-1', '{"text":"hi"}')
                 """, sessionId));
     }
-}
 
+    private UUID createTestOrg() {
+        UUID orgId = UUID.randomUUID();
+        jdbc.update("INSERT INTO organizations (id, name) VALUES (?, ?)", orgId, "Org " + orgId);
+        return orgId;
+    }
+
+    private UUID createTestUser() {
+        UUID userId = UUID.randomUUID();
+        jdbc.update(
+                "INSERT INTO users (id, email, password_hash, display_name) VALUES (?, ?, 'hash', 'Test User')",
+                userId, "user-" + userId + "@example.com"
+        );
+        return userId;
+    }
+}

@@ -13,3 +13,11 @@ spring:
     redis:
       host: localhost
       port: 6379
+
+handoff:
+  jwt:
+    secret: ${JWT_SECRET:}
+    access-token-expiration-seconds: ${JWT_ACCESS_EXPIRATION_SECONDS:900}
+    refresh-token-expiration-seconds: ${JWT_REFRESH_EXPIRATION_SECONDS:604800}
+    ws-ticket-expiration-seconds: ${WS_TICKET_EXPIRATION_SECONDS:30}
+
