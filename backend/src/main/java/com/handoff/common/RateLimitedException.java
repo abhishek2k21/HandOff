@@ -8,7 +8,14 @@ import org.springframework.http.HttpStatus;
  */
 public class RateLimitedException extends ApiException {
 
+    private final long retryAfterSeconds;
+
     public RateLimitedException(String message, long retryAfterSeconds) {
         super("RATE_LIMITED", message, HttpStatus.TOO_MANY_REQUESTS, Map.of("retryAfterSeconds", retryAfterSeconds));
+        this.retryAfterSeconds = retryAfterSeconds;
+    }
+
+    public long getRetryAfterSeconds() {
+        return retryAfterSeconds;
     }
 }

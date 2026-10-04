@@ -1,10 +1,12 @@
 package com.handoff.auth;
 
 import com.handoff.common.RateLimitedException;
-import java.time.Duration;
+import java.util.Collections;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
+import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Service;
 
 /**
@@ -22,6 +24,17 @@ public class RateLimiterService {
     private static final int MAX_TICKETS_PER_MINUTE = 10;
     private static final long WINDOW_SECONDS = 60;
 
+    private static final RedisScript<Long> RATE_LIMIT_SCRIPT = new DefaultRedisScript<>(
+            """
+            local current = redis.call('INCR', KEYS[1])
+            if current == 1 then
+                redis.call('EXPIRE', KEYS[1], tonumber(ARGV[1]))
+            end
+            return current
+            """,
+            Long.class
+    );
+
     private final StringRedisTemplate redis;
 
     public RateLimiterService(StringRedisTemplate redis) {
@@ -30,12 +43,9 @@ public class RateLimiterService {
 
     public void checkLoginRateLimit(String clientIp) {
         String key = LOGIN_PREFIX + (clientIp != null ? clientIp : "unknown");
-        Long count = redis.opsForValue().increment(key);
-        if (count != null && count == 1) {
-            redis.expire(key, Duration.ofSeconds(WINDOW_SECONDS));
-        }
+        long count = incrementAndExpire(key, WINDOW_SECONDS);
 
-        if (count != null && count > MAX_LOGIN_ATTEMPTS_PER_MINUTE) {
+        if (count > MAX_LOGIN_ATTEMPTS_PER_MINUTE) {
             Long ttl = redis.getExpire(key, TimeUnit.SECONDS);
             long retryAfter = (ttl != null && ttl > 0) ? ttl : WINDOW_SECONDS;
             throw new RateLimitedException(
@@ -47,12 +57,9 @@ public class RateLimiterService {
 
     public void checkWsTicketRateLimit(UUID userId) {
         String key = TICKET_PREFIX + userId;
-        Long count = redis.opsForValue().increment(key);
-        if (count != null && count == 1) {
-            redis.expire(key, Duration.ofSeconds(WINDOW_SECONDS));
-        }
+        long count = incrementAndExpire(key, WINDOW_SECONDS);
 
-        if (count != null && count > MAX_TICKETS_PER_MINUTE) {
+        if (count > MAX_TICKETS_PER_MINUTE) {
             Long ttl = redis.getExpire(key, TimeUnit.SECONDS);
             long retryAfter = (ttl != null && ttl > 0) ? ttl : WINDOW_SECONDS;
             throw new RateLimitedException(
@@ -60,5 +67,14 @@ public class RateLimiterService {
                     retryAfter
             );
         }
+    }
+
+    private long incrementAndExpire(String key, long windowSeconds) {
+        Long count = redis.execute(
+                RATE_LIMIT_SCRIPT,
+                Collections.singletonList(key),
+                String.valueOf(windowSeconds)
+        );
+        return count != null ? count : 1L;
     }
 }

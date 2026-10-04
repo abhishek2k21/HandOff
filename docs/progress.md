@@ -84,3 +84,10 @@ npm test
 - **Scripted Agent:** Deterministic agent implementation executing predefined scenarios (`REFUND_APPROVAL`, etc.) without LLM costs for reliable automated testing.
 - **Scenarios:** Scenarios defined in `docs/events.md` section 13.4 generating predictable event sequences.
 
+---
+
+## 5. Deployment TODO
+
+Behind a reverse proxy, every client looks like the proxy's address. In slice 10, configure Tomcat remote IP handling (`server.forward-headers-strategy=native` with `server.tomcat.remoteip.internal-proxies` limited to the proxy's address) and make the proxy overwrite `X-Forwarded-For`. Verify against the Spring Boot documentation first. Add a test for it.
+
+
