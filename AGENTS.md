@@ -117,9 +117,16 @@ handoff/
 - E2E: `npx playwright test`
 
 ## 14. Git rules
-- Branch per slice: `slice/<number>-<name>`. Small commits: `feat:`, `fix:`, `test:`, `docs:`, `chore:`.
-- Commit only when tests pass. Never commit `.env`, build output, or `node_modules`.
-- Merge a slice into `main` only after the developer has verified it.
+- Remote: origin = https://github.com/abhishek2k21/HandOff. Do not add, remove or
+  change remotes.
+- Branch per slice: slice/<number>-<name>. Small commits: feat:, fix:, test:,
+  docs:, chore:.
+- Commit only when tests pass. Never commit .env, build output or node_modules.
+- You may push the current slice branch to origin only after I approve, with
+  git push -u origin <branch>. Never push to main. Never force-push. Never
+  delete remote branches.
+- Merge into main only through a GitHub Pull Request that I merge myself, after
+  CI passes and CodeRabbit has reviewed it.
 
 ## 15. Definition of done (per slice)
 - Builds, lints, and all tests pass; the new rules have tests.
