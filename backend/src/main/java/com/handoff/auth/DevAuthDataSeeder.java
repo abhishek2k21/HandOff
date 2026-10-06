@@ -16,6 +16,7 @@ import org.springframework.transaction.annotation.Transactional;
  */
 @Component
 @Profile("dev")
+@org.springframework.core.annotation.Order(1)
 public class DevAuthDataSeeder implements ApplicationRunner {
 
     private static final Logger log = LoggerFactory.getLogger(DevAuthDataSeeder.class);

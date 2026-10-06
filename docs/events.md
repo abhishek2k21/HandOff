@@ -522,6 +522,12 @@ CREATE TABLE commands (
 );
 ```
 
+*Note on V3 schema (`V3__tickets_and_orders.sql`):*
+In Slice 2, the schema adds synthetic support tables `orders`, `tickets` (with composite foreign key `(organization_id, order_id) -> orders(organization_id, id)`), `ticket_notes`, and `refunds`. To enforce at most one active session per ticket within an organization, a partial unique index is added on sessions:
+```sql
+CREATE UNIQUE INDEX sessions_active_ticket_uq ON sessions (organization_id, ticket_id) WHERE ended_at IS NULL;
+```
+
 ### 10.2 Assigning `seq` (gapless)
 
 All writes for one session happen in one transaction that first locks the session row by incrementing the counter.
@@ -672,11 +678,42 @@ Any tool name outside this list MUST be rejected by the runtime: no tool execute
 
 | Scenario | Behavior | Used to test |
 |---|---|---|
-| SIMPLE_LOOKUP | lookup_order, add_note, close_ticket, no approval | Basic ordering and streaming |
+| SIMPLE_LOOKUP | lookup_order (<orderId>), add_note (<ticketId>), close_ticket (<ticketId>), no approval | Basic ordering and streaming (seq 1..13) |
 | REFUND_APPROVAL | lookup_order, then issue_refund above the limit, then wait for approval | Approval gates, race on decision, audit |
 | OFF_TRACK | Proposes a wrong resolution; if a STEER arrives before the next step, switches to the steered resolution | Steering |
 | BUDGET_EXHAUST | Repeats lookup_order until the step budget ends | Budget failure |
-| LONG_STREAM | Emits 2,000 AGENT_TEXT chunks | Replay and load tests |
+| LONG_STREAM | Emits 2,000 AGENT_TEXT chunks followed by SESSION_COMPLETED | Replay and load tests (seq 1..2003) |
+
+**Exact Event Sequences for Slice 2 Scenarios:**
+
+The scripted agent takes `<ticketId>` and the linked `<orderId>` dynamically from the session's ticket (worked example: ticket `T-101` linked to order `8841`). If the ticket has no linked order, `SIMPLE_LOOKUP` appends an `ERROR` event (`code = TOOL_FAILED`, `recoverable = false`) followed by `SESSION_FAILED` (`reason = AGENT_ERROR`). `LONG_STREAM` works for any ticket and does not close it.
+
+- **SIMPLE_LOOKUP (13 events with linked order):**
+  1. `SESSION_STARTED` (ticketId `<ticketId>`, scenario "SIMPLE_LOOKUP", stepBudget 20, tokenBudget 20000, createdBy user)
+  2. `CONTROL_TAKEN` (fromUserId null, toUserId creator, via "SESSION_START")
+  3. `AGENT_TEXT` ("Looking up order <orderId>...", final: true)
+  4. `TOOL_CALL` (toolCallId "tc-1", tool "lookup_order", args `{"orderId":"<orderId>"}`, risky: false)
+  5. `TOOL_RESULT` (toolCallId "tc-1", ok: true, result order object)
+  6. `AGENT_TEXT` ("Order <orderId> is delivered. Adding note to ticket...", final: true)
+  7. `TOOL_CALL` (toolCallId "tc-2", tool "add_note", args `{"ticketId":"<ticketId>","text":"Verified order <orderId> status: DELIVERED."}`, risky: false)
+  8. `TOOL_RESULT` (toolCallId "tc-2", ok: true, result `{"ticketId":"<ticketId>","noteAdded":true}`)
+  9. `AGENT_TEXT` ("Closing ticket <ticketId>...", final: true)
+  10. `TOOL_CALL` (toolCallId "tc-3", tool "close_ticket", args `{"ticketId":"<ticketId>","resolution":"Informed customer that order <orderId> was delivered."}`, risky: false)
+  11. `TOOL_RESULT` (toolCallId "tc-3", ok: true, result `{"ticketId":"<ticketId>","status":"CLOSED"}`)
+  12. `AGENT_TEXT` ("Ticket resolved and closed.", final: true)
+  13. `SESSION_COMPLETED` (outcome "RESOLVED", summary "Looked up order <orderId>, added verification note, and closed ticket.")
+
+- **SIMPLE_LOOKUP Failure Sequence (ticket with no linked order):**
+  1. `SESSION_STARTED` (ticketId `<ticketId>`, scenario "SIMPLE_LOOKUP", stepBudget 20, tokenBudget 20000, createdBy user)
+  2. `CONTROL_TAKEN` (fromUserId null, toUserId creator, via "SESSION_START")
+  3. `ERROR` (code "TOOL_FAILED", message "No linked order for ticket <ticketId>", recoverable: false)
+  4. `SESSION_FAILED` (reason "AGENT_ERROR", message "Failed to perform lookup: ticket has no linked order.")
+
+- **LONG_STREAM (2003 events):**
+  1. `SESSION_STARTED` (ticketId `<ticketId>`, scenario "LONG_STREAM", stepBudget 20, tokenBudget 20000, createdBy user)
+  2. `CONTROL_TAKEN` (fromUserId null, toUserId creator, via "SESSION_START")
+  3. to 2002. `AGENT_TEXT` (messageId "m-1", text "Chunk N of 2000 for ticket <ticketId>...", final: false for 1..1999, final: true for 2000th / seq 2002)
+  2003. `SESSION_COMPLETED` (outcome "COMPLETED", summary "Completed 2000 stream chunks.")
 
 Scripted agents use fixed text, fixed ids (`tc-1`, `tc-2`, ...), and no randomness. Delays between steps are configurable and are set to 0 in automated tests.
 

@@ -6,7 +6,7 @@
 |---|---|---|---|
 | **0** | **Project Skeleton** | **DONE** (merged) | Docker Compose (PostgreSQL 16, Redis 7), Flyway V1 migration (V1__create_core_tables.sql: sessions, events, approvals, commands with triggers), Spring Boot 3 MVC with JDBC, HealthController, temporary WS echo handler, React 19 + TypeScript frontend with health check UI, CI pipeline. |
 | **1** | **Authentication & Roles** | **DONE** | V2 migration (organizations, users, memberships, refresh_tokens), register, login, refresh, logout, roles (VIEWER, OPERATOR, APPROVER, ADMIN), one-time WebSocket ticket (`POST /api/ws-ticket`), dev seed data, login & register UI with Zustand store, memory-only access token, persistent refresh token in localStorage, single-flight in-tab refresh, and multi-tab Web Lock coordination. |
-| 2 | Sessions & Scripted Agent | NEXT | Scripted agent scenarios, session creation & lifecycle. |
+| **2** | **Sessions & Scripted Agent** | **IN PROGRESS (backend)** | V3 migration (tickets, orders), EventStore.append with gapless seq (T1, T2), session REST API, ToolRuntime allowlist, SIMPLE_LOOKUP & LONG_STREAM scenarios. |
 | 3 | Event Log & Real WebSocket | UPCOMING | Gapless sequence assignment (R1), real WS protocol replacing echo handler. |
 | 4 | Replay & Reconnect | UPCOMING | Replay protocol (R2), Zustand event store, React timeline. |
 | 5 | Control & Intervention | UPCOMING | Single controller lease with Redis Lua (R4), steer, pause, resume, takeover, hand-off. |
@@ -78,11 +78,16 @@ npm test
 
 ---
 
-## 4. Next Slice: Slice 2 (Sessions and Scripted Agent)
+## 4. Slice 2: Sessions and Scripted Agent (Backend In Progress)
 
-- **Sessions Lifecycle:** Session creation, state machine (`CREATED`, `RUNNING`, `PAUSED`, `AWAITING_APPROVAL`, `COMPLETED`, `FAILED`), step and token budget tracking.
-- **Scripted Agent:** Deterministic agent implementation executing predefined scenarios (`REFUND_APPROVAL`, etc.) without LLM costs for reliable automated testing.
-- **Scenarios:** Scenarios defined in `docs/events.md` section 13.4 generating predictable event sequences.
+- **Sessions Lifecycle:** Session creation, state machine (`RUNNING`, `PAUSED`, `AWAITING_APPROVAL`, `HANDED_OFF`, `COMPLETED`, `FAILED`), org tenant scoping.
+- **Event Persistence:** EventStore.append with atomic `UPDATE sessions SET last_seq = last_seq + 1 ... RETURNING last_seq` (T1, T2) and SessionStatusReducer.
+- **Scripted Agent:** Deterministic execution for `SIMPLE_LOOKUP` and `LONG_STREAM` scenarios with zero test delay.
+- **Tool Runtime:** Allowlist and argument validation for synthetic tools (`lookup_order`, `add_note`, `close_ticket`, `issue_refund`). Atomic tool DB effects and `TOOL_RESULT` commit.
+- **Frontend:** Up next after backend review approval.
+
+### Known Limitations
+- Server restart recovery is planned for Slice 8. In Slice 2, if the backend server restarts while a session is running, the session row remains in `RUNNING` status without an active background runner until restart recovery and `AGENT_RECOVERED` are implemented in Slice 8.
 
 ---
 

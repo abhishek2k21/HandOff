@@ -99,14 +99,14 @@ handoff/
 
 ## 12. Build order (vertical slices)
 0. **DONE:** skeleton: Docker Compose, Postgres, Redis, health endpoint, CI, temporary `/ws` echo handler. V1 migration creates `sessions`, `events`, `approvals`, `commands` exactly as `docs/events.md` section 10.1.
-1. Auth: V2 migration (organizations, users, memberships, refresh tokens), register, login, refresh, roles, `/ws-ticket`.
-2. Sessions and scripted agent producing events (scenarios in `docs/events.md` section 13.4).
-3. Event log with gapless `seq` (T1, T2) and the real WebSocket protocol, replacing the echo handler.
+1. **DONE:** Auth: V2 migration (organizations, users, memberships, refresh tokens), register, login, refresh, roles, `/ws-ticket`.
+2. Sessions & Scripted Agent: V3 migration (tickets, orders), EventStore.append with gapless seq (T1, T2), session REST API, ToolRuntime allowlist, SIMPLE_LOOKUP & LONG_STREAM scenarios, minimal polling UI.
+3. Real WebSocket & Redis Stream: Raw WebSocketHandler protocol replacing echo handler, live fan-out via Redis stream, ticket-based WS authentication.
 4. Replay and reconnect (T3, T17, T18) and React timeline with the Zustand store.
-5. Steer, pause, resume, controller lease, take control, hand off (T6, T7).
-6. Approval gates, queue screen, timeout job (T4, T5, T10, T11).
+5. Steer, pause, resume, controller lease, take control, hand off (T6, T7), OFF_TRACK scenario.
+6. Approval gates, queue screen, timeout job, REFUND_APPROVAL scenario (T4, T5, T10, T11).
 7. Audit screen, metrics page, presence.
-8. Budgets, restart recovery (T14, T15), command idempotency (T13).
+8. Budgets (BUDGET_EXHAUST scenario), restart recovery (T14, T15), command idempotency (T13).
 9. LLM agent behind the same interface, spending cap.
 10. Load test with k6, Prometheus and Grafana, README, deployment, demo recording.
 

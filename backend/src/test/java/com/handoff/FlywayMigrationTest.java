@@ -22,7 +22,8 @@ class FlywayMigrationTest extends AbstractIntegrationTest {
     void allTablesExist() {
         String[] expectedTables = {
             "sessions", "events", "approvals", "commands",
-            "organizations", "users", "memberships", "refresh_tokens"
+            "organizations", "users", "memberships", "refresh_tokens",
+            "orders", "tickets", "ticket_notes", "refunds"
         };
         for (String table : expectedTables) {
             Integer count = jdbc.queryForObject(
@@ -145,6 +146,49 @@ class FlywayMigrationTest extends AbstractIntegrationTest {
                 INSERT INTO events (session_id, seq, type, actor_kind, actor_id, payload)
                 VALUES (?, 1, 'AGENT_TEXT', 'AGENT', 'agent-1', '{"text":"hi"}')
                 """, sessionId));
+    }
+
+    @Test
+    void ticketWithInvalidCompositeOrderForeignKeyRejected() {
+        UUID orgId = createTestOrg();
+        assertThrows(DataAccessException.class, () ->
+            jdbc.update("""
+                INSERT INTO tickets (organization_id, id, customer_name, customer_email, subject, description, status, order_id)
+                VALUES (?, 'T-999', 'Customer', 'cust@example.com', 'Subj', 'Desc', 'OPEN', 'NON_EXISTENT_ORDER')
+                """, orgId));
+    }
+
+    @Test
+    void activeSessionUniqueConstraintBlocksSecondActiveSession() {
+        UUID orgId = createTestOrg();
+        UUID userId = createTestUser();
+        UUID session1Id = UUID.randomUUID();
+        UUID session2Id = UUID.randomUUID();
+        String ticketId = "T-ACTIVE";
+
+        // Insert first active session
+        jdbc.update("""
+            INSERT INTO sessions (id, organization_id, ticket_id, agent_type, status,
+                                  last_seq, step_budget, token_budget, created_by)
+            VALUES (?, ?, ?, 'SCRIPTED', 'RUNNING', 1, 20, 20000, ?)
+            """, session1Id, orgId, ticketId, userId);
+
+        // Second active session for same ticket must fail unique constraint sessions_active_ticket_uq
+        assertThrows(DataAccessException.class, () ->
+            jdbc.update("""
+                INSERT INTO sessions (id, organization_id, ticket_id, agent_type, status,
+                                      last_seq, step_budget, token_budget, created_by)
+                VALUES (?, ?, ?, 'SCRIPTED', 'RUNNING', 1, 20, 20000, ?)
+                """, session2Id, orgId, ticketId, userId));
+
+        // Once session1 is ended (ended_at is NOT NULL), second session can be inserted
+        jdbc.update("UPDATE sessions SET ended_at = now() WHERE id = ?", session1Id);
+
+        jdbc.update("""
+            INSERT INTO sessions (id, organization_id, ticket_id, agent_type, status,
+                                  last_seq, step_budget, token_budget, created_by)
+            VALUES (?, ?, ?, 'SCRIPTED', 'RUNNING', 1, 20, 20000, ?)
+            """, session2Id, orgId, ticketId, userId);
     }
 
     private UUID createTestOrg() {
