@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
 import { fetchHealth, type HealthResponse } from './api/health';
 import { LoginPage } from './pages/LoginPage';
 import { RegisterPage } from './pages/RegisterPage';
+import { SessionDetailPage } from './pages/SessionDetailPage';
+import { SessionsPage } from './pages/SessionsPage';
 import { useAuthStore } from './store/auth';
 
 function App() {
@@ -11,6 +13,9 @@ function App() {
   const restoreSession = useAuthStore((s) => s.restoreSession);
 
   const [authView, setAuthView] = useState<'login' | 'register'>('login');
+  const [currentView, setCurrentView] = useState<'sessions' | 'session-detail'>('sessions');
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
   const [healthLoading, setHealthLoading] = useState(true);
@@ -48,7 +53,7 @@ function App() {
 
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100 flex flex-col items-center justify-center p-4 selection:bg-indigo-500 selection:text-white">
-      <div className="w-full max-w-md space-y-6">
+      <div className={`w-full ${authStatus === 'authenticated' ? 'max-w-4xl' : 'max-w-md'} space-y-6 transition-all`}>
         {/* Brand Header */}
         <header className="text-center">
           <h1 className="text-3xl font-bold tracking-tight bg-gradient-to-r from-indigo-400 to-cyan-400 bg-clip-text text-transparent">
@@ -80,36 +85,59 @@ function App() {
 
         {/* Authenticated User Dashboard */}
         {authStatus === 'authenticated' && user && (
-          <div className="rounded-2xl border border-gray-800 bg-gray-900/60 backdrop-blur-sm shadow-xl p-6">
-            <div className="flex items-center justify-between pb-5 border-b border-gray-800">
-              <div>
-                <p className="text-xs uppercase tracking-wider font-semibold text-gray-400">
-                  Signed In
-                </p>
-                <div className="mt-1 flex items-center gap-2">
-                  <span className="text-base font-medium text-white">{user.name}</span>
-                  <span className="rounded bg-indigo-950/80 border border-indigo-800 px-2 py-0.5 text-xs font-semibold text-indigo-300">
-                    {user.role}
-                  </span>
+          <div className="space-y-6">
+            <div className="rounded-2xl border border-gray-800 bg-gray-900/60 backdrop-blur-sm shadow-xl p-6">
+              <div className="flex items-center justify-between pb-4 border-b border-gray-800">
+                <div>
+                  <p className="text-xs uppercase tracking-wider font-semibold text-gray-400">
+                    Signed In
+                  </p>
+                  <div className="mt-1 flex items-center gap-2">
+                    <span className="text-base font-medium text-white">{user.name}</span>
+                    <span className="rounded bg-indigo-950/80 border border-indigo-800 px-2 py-0.5 text-xs font-semibold text-indigo-300">
+                      {user.role}
+                    </span>
+                  </div>
                 </div>
+                <button
+                  type="button"
+                  onClick={() => logout()}
+                  className="rounded-lg border border-gray-700 bg-gray-800/80 px-3 py-1.5 text-xs font-medium text-gray-300 hover:bg-gray-700 hover:text-white transition-colors cursor-pointer"
+                >
+                  Log Out
+                </button>
               </div>
-              <button
-                type="button"
-                onClick={() => logout()}
-                className="rounded-lg border border-gray-700 bg-gray-800/80 px-3 py-1.5 text-xs font-medium text-gray-300 hover:bg-gray-700 hover:text-white transition-colors cursor-pointer"
-              >
-                Log Out
-              </button>
+
+              <div className="mt-3 text-xs text-gray-400">
+                <p>
+                  Logged in as <strong className="text-gray-200">{user.name}</strong> ({user.role})
+                </p>
+                <p className="mt-0.5 font-mono text-[11px] text-gray-500 truncate">
+                  Org ID: {user.organizationId}
+                </p>
+              </div>
             </div>
 
-            <div className="mt-4 text-xs text-gray-400">
-              <p>
-                Logged in as <strong className="text-gray-200">{user.name}</strong> ({user.role})
-              </p>
-              <p className="mt-1 font-mono text-[11px] text-gray-500 truncate">
-                Org ID: {user.organizationId}
-              </p>
-            </div>
+            {/* State-based View Switching */}
+            {currentView === 'sessions' ? (
+              <SessionsPage
+                userRole={user.role}
+                onSelectSession={(sessionId) => {
+                  setSelectedSessionId(sessionId);
+                  setCurrentView('session-detail');
+                }}
+              />
+            ) : (
+              selectedSessionId && (
+                <SessionDetailPage
+                  sessionId={selectedSessionId}
+                  onBack={() => {
+                    setCurrentView('sessions');
+                    setSelectedSessionId(null);
+                  }}
+                />
+              )
+            )}
           </div>
         )}
 
@@ -150,7 +178,7 @@ function App() {
 
         {/* Footer info */}
         <footer className="text-center text-xs text-gray-600">
-          Slice 1 · Authentication
+          Slice 2 · Sessions & Scripted Agent
         </footer>
       </div>
     </div>
