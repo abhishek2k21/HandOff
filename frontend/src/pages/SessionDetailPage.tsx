@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { getSession, getSessionEvents } from '../api/sessions';
 import type { Session, SessionEvent } from '../api/types';
+import { useAuthStore } from '../store/auth';
 import { StatusBadge } from './SessionsPage';
 
 // TEMPORARY: Slice 2 polling. Replaced by WebSocket streaming in Slice 3 and Zustand event log replay in Slice 4.
@@ -11,6 +12,9 @@ interface SessionDetailPageProps {
 }
 
 export function SessionDetailPage({ sessionId, onBack }: SessionDetailPageProps) {
+  const authStatus = useAuthStore((s) => s.status);
+  const accessToken = useAuthStore((s) => s.accessToken);
+
   const [session, setSession] = useState<Session | null>(null);
   const [events, setEvents] = useState<SessionEvent[]>([]);
   const [loading, setLoading] = useState(true);
@@ -23,6 +27,10 @@ export function SessionDetailPage({ sessionId, onBack }: SessionDetailPageProps)
 
   // Initial load and polling lifecycle
   useEffect(() => {
+    if (authStatus !== 'authenticated' || !accessToken) {
+      return;
+    }
+
     let cancelled = false;
 
     // Helper to stop polling
@@ -141,7 +149,7 @@ export function SessionDetailPage({ sessionId, onBack }: SessionDetailPageProps)
       stopPolling();
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [sessionId]);
+  }, [sessionId, authStatus, accessToken]);
 
   // Cap visible events to latest 200
   const totalCount = events.length;
