@@ -25,16 +25,19 @@ public class AgentRunner {
     private final SessionRepository sessionRepository;
     private final Agent agent;
     private final EventStore eventStore;
+    private final org.springframework.transaction.support.TransactionTemplate transactionTemplate;
     private final Executor executor = ForkJoinPool.commonPool();
 
     public AgentRunner(
             SessionRepository sessionRepository,
             Agent agent,
-            EventStore eventStore
+            EventStore eventStore,
+            org.springframework.transaction.support.TransactionTemplate transactionTemplate
     ) {
         this.sessionRepository = sessionRepository;
         this.agent = agent;
         this.eventStore = eventStore;
+        this.transactionTemplate = transactionTemplate;
     }
 
     public void runSession(UUID sessionId) {
@@ -51,15 +54,18 @@ public class AgentRunner {
         } catch (Exception e) {
             log.error("Agent loop failed unexpectedly for session {}", sessionId, e);
             try {
-                eventStore.append(sessionId, "ERROR", ActorKind.SYSTEM, "system", "System", null, Map.of(
-                        "code", "INTERNAL",
-                        "message", e.getMessage() != null ? e.getMessage() : "Internal agent error",
-                        "recoverable", false
-                ));
-                eventStore.append(sessionId, "SESSION_FAILED", ActorKind.SYSTEM, "system", "System", null, Map.of(
-                        "reason", "INTERNAL",
-                        "message", e.getMessage() != null ? e.getMessage() : "Session failed due to internal error"
-                ));
+                transactionTemplate.execute(status -> {
+                    eventStore.append(sessionId, "ERROR", ActorKind.SYSTEM, "system", "System", null, Map.of(
+                            "code", "INTERNAL",
+                            "message", e.getMessage() != null ? e.getMessage() : "Internal agent error",
+                            "recoverable", false
+                    ));
+                    eventStore.append(sessionId, "SESSION_FAILED", ActorKind.SYSTEM, "system", "System", null, Map.of(
+                            "reason", "INTERNAL",
+                            "message", e.getMessage() != null ? e.getMessage() : "Session failed due to internal error"
+                    ));
+                    return null;
+                });
             } catch (Exception appendEx) {
                 log.error("Failed to append terminal error events for session {}", sessionId, appendEx);
             }
