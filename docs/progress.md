@@ -7,8 +7,8 @@
 | **0** | **Project Skeleton** | **DONE** (merged) | Docker Compose (PostgreSQL 16, Redis 7), Flyway V1 migration (V1__create_core_tables.sql: sessions, events, approvals, commands with triggers), Spring Boot 3 MVC with JDBC, HealthController, temporary WS echo handler, React 19 + TypeScript frontend with health check UI, CI pipeline. |
 | **1** | **Authentication & Roles** | **DONE** | V2 migration (organizations, users, memberships, refresh_tokens), register, login, refresh, logout, roles (VIEWER, OPERATOR, APPROVER, ADMIN), one-time WebSocket ticket (`POST /api/ws-ticket`), dev seed data, login & register UI with Zustand store, memory-only access token, persistent refresh token in localStorage, single-flight in-tab refresh, and multi-tab Web Lock coordination. |
 | **2** | **Sessions & Scripted Agent** | **DONE** | V3 migration (tickets, orders), EventStore.append with gapless seq (T1, T2), session REST API, ToolRuntime allowlist, SIMPLE_LOOKUP & LONG_STREAM scenarios, SessionsPage with ticket selector & status badges, SessionDetailPage with polling event log (1s) and compact row rendering. |
-| 3 | Event Log & Real WebSocket | UPCOMING | Gapless sequence assignment (R1), real WS protocol replacing echo handler. |
-| 4 | Replay & Reconnect | UPCOMING | Replay protocol (R2), Zustand event store, React timeline. |
+| 3 | Event Log & Real WebSocket | IN PROGRESS | Stage A: WebSocket protocol core (R1, ticket auth, replay batches, live Redis stream). Stage B: Backend hardening (reconciliation job, slow-consumer 4420, connection/session limits, heartbeat, resilience). |
+| 4 | Replay & Reconnect | UPCOMING | Frontend WebSocket client, Zustand event store, React timeline (R2). |
 | 5 | Control & Intervention | UPCOMING | Single controller lease with Redis Lua (R4), steer, pause, resume, takeover, hand-off. |
 | 6 | Approval Gates | UPCOMING | Risky tool approval flow (R3, R6), approval queue UI, timeout job. |
 | 7 | Audit & Metrics | UPCOMING | Audit log viewer (R7), oversight metrics, presence indicators. |
@@ -91,6 +91,7 @@ npm run build
 
 ### Known Limitations
 - Server restart recovery is planned for Slice 8. In Slice 2, if the backend server restarts while a session is running, the session row remains in `RUNNING` status without an active background runner until restart recovery and `AGENT_RECOVERED` are implemented in Slice 8.
+- Commands over the socket arrive in slice 5 (a "command" op currently returns `VALIDATION_FAILED`), and role or membership changes do not affect open sockets yet.
 
 ---
 
