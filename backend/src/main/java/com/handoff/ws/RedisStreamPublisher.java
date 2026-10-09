@@ -21,10 +21,15 @@ public class RedisStreamPublisher {
 
     private final StringRedisTemplate redisTemplate;
     private final ObjectMapper objectMapper;
+    java.util.function.Predicate<Event> testDropFilter = null;
 
     public RedisStreamPublisher(StringRedisTemplate redisTemplate, ObjectMapper objectMapper) {
         this.redisTemplate = redisTemplate;
         this.objectMapper = objectMapper;
+    }
+
+    public void setTestDropFilter(java.util.function.Predicate<Event> filter) {
+        this.testDropFilter = filter;
     }
 
     public static String getStreamKey(UUID sessionId) {
@@ -32,6 +37,11 @@ public class RedisStreamPublisher {
     }
 
     public void publish(Event event) {
+        if (testDropFilter != null && testDropFilter.test(event)) {
+            log.info("Test drop filter dropped event seq {} type {} for session {}",
+                    event.seq(), event.type(), event.sessionId());
+            return;
+        }
         String streamKey = getStreamKey(event.sessionId());
         try {
             String eventJson = objectMapper.writeValueAsString(event);

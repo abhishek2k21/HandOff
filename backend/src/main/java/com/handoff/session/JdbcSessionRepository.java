@@ -114,4 +114,24 @@ public class JdbcSessionRepository implements SessionRepository {
         Integer count = jdbc.queryForObject(sql, Integer.class, orgId, ticketId);
         return count != null && count > 0;
     }
+
+    @Override
+    public java.util.Map<UUID, Long> findLastSeqsByIds(java.util.Collection<UUID> sessionIds) {
+        if (sessionIds == null || sessionIds.isEmpty()) {
+            return java.util.Collections.emptyMap();
+        }
+        String sql = "SELECT id, last_seq FROM sessions WHERE id = ANY(?)";
+        UUID[] array = sessionIds.toArray(new UUID[0]);
+        return jdbc.query(
+                sql,
+                ps -> ps.setArray(1, ps.getConnection().createArrayOf("uuid", array)),
+                rs -> {
+                    java.util.Map<UUID, Long> map = new java.util.HashMap<>();
+                    while (rs.next()) {
+                        map.put(UUID.fromString(rs.getString("id")), rs.getLong("last_seq"));
+                    }
+                    return map;
+                }
+        );
+    }
 }

@@ -44,6 +44,7 @@ public abstract class AbstractIntegrationTest {
         registry.add("spring.data.redis.host", REDIS::getHost);
         registry.add("spring.data.redis.port", () -> REDIS.getMappedPort(6379));
         registry.add("handoff.jwt.secret", () -> "test-secret-key-must-be-at-least-32-bytes-long-for-testing!");
+        registry.add("handoff.ws.reconciliation-interval-ms", () -> 100);
     }
 
     @org.junit.jupiter.api.BeforeEach

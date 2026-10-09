@@ -97,6 +97,16 @@ public class RedisStreamListener implements Runnable {
         });
     }
 
+    public Map<UUID, List<SessionSubscription>> getActiveSubscriptionsSnapshot() {
+        Map<UUID, List<SessionSubscription>> snapshot = new HashMap<>();
+        sessionSubscribers.forEach((sessionId, subs) -> {
+            if (subs != null && !subs.isEmpty()) {
+                snapshot.put(sessionId, new ArrayList<>(subs));
+            }
+        });
+        return snapshot;
+    }
+
     @Override
     public void run() {
         log.info("RedisStreamListener started.");

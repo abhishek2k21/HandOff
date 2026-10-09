@@ -23,6 +23,8 @@ handoff:
     access-token-expiration-seconds: ${JWT_ACCESS_EXPIRATION_SECONDS:900}
     refresh-token-expiration-seconds: ${JWT_REFRESH_EXPIRATION_SECONDS:604800}
     ws-ticket-expiration-seconds: ${WS_TICKET_EXPIRATION_SECONDS:30}
+  ws:
+    reconciliation-interval-ms: ${WS_RECONCILIATION_INTERVAL_MS:2000}
   demo-data:
     enabled: ${DEMO_DATA_ENABLED:false}
     reset-on-start: ${DEMO_DATA_RESET_ON_START:false}

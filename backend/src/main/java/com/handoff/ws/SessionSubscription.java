@@ -311,6 +311,33 @@ public class SessionSubscription {
         }
     }
 
+    /**
+     * Reconciles this subscription if it has fallen behind targetLastSeq.
+     * Invoked by ReconciliationService; checks state, generation, and lastSentSeq < target
+     * inside the lock on the subscription's executor.
+     */
+    public void catchUpIfBehind(long targetLastSeq) {
+        if (state != State.LIVE || !isCurrentGeneration()) {
+            return;
+        }
+        executor.execute(() -> {
+            lock.lock();
+            try {
+                if (state != State.LIVE || !isCurrentGeneration()) {
+                    return;
+                }
+                if (lastSentSeq < targetLastSeq) {
+                    fillGapFromDatabase(lastSentSeq, targetLastSeq);
+                }
+            } catch (Exception ex) {
+                log.error("Error during reconciliation catch-up for session {} conn {}",
+                        sessionId, session.getId(), ex);
+            } finally {
+                lock.unlock();
+            }
+        });
+    }
+
     private void fillGapFromDatabase(long from, long to) throws IOException {
         long cursor = from;
         while (cursor < to && state != State.CANCELLED) {
@@ -319,12 +346,18 @@ public class SessionSubscription {
             if (missing.isEmpty()) {
                 break;
             }
+            long lastCursor = cursor;
             for (Event ev : missing) {
                 if (ev.seq() > lastSentSeq) {
                     sendMessage(new WsMessage.LiveEventResponse(ev));
                     lastSentSeq = ev.seq();
                 }
-                cursor = ev.seq();
+                if (ev.seq() > cursor) {
+                    cursor = ev.seq();
+                }
+            }
+            if (cursor <= lastCursor) {
+                break;
             }
         }
     }

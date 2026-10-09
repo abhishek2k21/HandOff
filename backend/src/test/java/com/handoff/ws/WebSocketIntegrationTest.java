@@ -109,6 +109,12 @@ public class WebSocketIntegrationTest extends AbstractIntegrationTest {
     @Autowired
     private ObjectMapper objectMapper;
 
+    @Autowired
+    private ReconciliationService reconciliationService;
+
+    @Autowired
+    private RedisStreamPublisher redisStreamPublisher;
+
     private final List<TestWsClient> openClients = Collections.synchronizedList(new ArrayList<>());
 
     @BeforeEach
@@ -117,10 +123,13 @@ public class WebSocketIntegrationTest extends AbstractIntegrationTest {
         handOffWebSocketHandler.setTestHookAfterRegistrationBeforeReaderActivation(null);
         handOffWebSocketHandler.setTestHookBeforeHistoryRead(null);
         handOffWebSocketHandler.setTestHookBeforeBufferFlush(null);
+        redisStreamPublisher.setTestDropFilter(null);
+        reconciliationService.setEnabled(true);
     }
 
     @AfterEach
     void tearDown() {
+        redisStreamPublisher.setTestDropFilter(null);
         for (TestWsClient client : openClients) {
             client.close();
         }
@@ -921,6 +930,72 @@ public class WebSocketIntegrationTest extends AbstractIntegrationTest {
         assertEquals("1", records.get(0).getValue().get("seq"));
         assertEquals("2", records.get(1).getValue().get("seq"));
         assertEquals("3", records.get(2).getValue().get("seq"));
+    }
+
+    // ==========================================
+    // Stage B: Reconciliation Job Tests
+    // ==========================================
+
+    @Test
+    void reconciliationCatchesUpDroppedFinalEvent() throws Exception {
+        UUID orgId = createTestOrg();
+        UUID userId = createTestUser(orgId, Role.OPERATOR);
+        UUID sessionId = createTestSession(orgId, userId);
+        String ticket = createWsTicket(userId, orgId, Role.OPERATOR, "Alice");
+
+        TestWsClient client = connectAndAuth(ticket);
+        client.nextMessage(3, TimeUnit.SECONDS); // auth_ok
+
+        client.send("{\"op\":\"subscribe\",\"sessionId\":\"" + sessionId + "\",\"fromSeq\":0}");
+        client.nextMessage(3, TimeUnit.SECONDS); // subscribed
+        client.nextMessage(3, TimeUnit.SECONDS); // caught_up
+
+        // Event 1 delivered normally via Redis stream
+        Event ev1 = appendEventInTx(sessionId, "AGENT_TEXT", "event 1");
+        JsonNode m1 = client.nextMessage(3, TimeUnit.SECONDS);
+        assertNotNull(m1, "Event 1 must be delivered");
+        assertEquals("event", m1.get("op").asText());
+        assertEquals(ev1.seq(), m1.get("event").get("seq").asLong());
+
+        // Configure test drop filter: simulate Redis publishing failure for final event
+        redisStreamPublisher.setTestDropFilter(ev -> "SESSION_COMPLETED".equals(ev.type()));
+
+        Event finalEvent = appendEventInTx(sessionId, "SESSION_COMPLETED", "Session finished");
+        assertEquals(2L, finalEvent.seq());
+
+        // With reconciliation enabled, the background job catches up within test interval (100ms)
+        JsonNode m2 = client.nextMessage(3, TimeUnit.SECONDS);
+        assertNotNull(m2, "Dropped final event must be delivered via reconciliation");
+        assertEquals("event", m2.get("op").asText());
+        assertEquals("SESSION_COMPLETED", m2.get("event").get("type").asText());
+        assertEquals(finalEvent.seq(), m2.get("event").get("seq").asLong());
+    }
+
+    @Test
+    void upToDateSubscriptionReceivesNoDuplicatesDuringReconciliation() throws Exception {
+        UUID orgId = createTestOrg();
+        UUID userId = createTestUser(orgId, Role.OPERATOR);
+        UUID sessionId = createTestSession(orgId, userId);
+        String ticket = createWsTicket(userId, orgId, Role.OPERATOR, "Alice");
+
+        TestWsClient client = connectAndAuth(ticket);
+        client.nextMessage(3, TimeUnit.SECONDS); // auth_ok
+
+        client.send("{\"op\":\"subscribe\",\"sessionId\":\"" + sessionId + "\",\"fromSeq\":0}");
+        client.nextMessage(3, TimeUnit.SECONDS); // subscribed
+        client.nextMessage(3, TimeUnit.SECONDS); // caught_up
+
+        Event ev1 = appendEventInTx(sessionId, "AGENT_TEXT", "event 1");
+        JsonNode m1 = client.nextMessage(3, TimeUnit.SECONDS);
+        assertNotNull(m1);
+        assertEquals(ev1.seq(), m1.get("event").get("seq").asLong());
+
+        // Explicitly trigger reconciliation job while subscription is up to date
+        reconciliationService.runReconciliation();
+
+        // Verify no duplicate message arrived using timeout
+        JsonNode duplicate = client.nextMessage(250, TimeUnit.MILLISECONDS);
+        assertNull(duplicate, "Subscription that is up to date must receive no duplicates");
     }
 
     // ==========================================
