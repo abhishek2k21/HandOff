@@ -431,7 +431,7 @@ CONNECTING -> AUTHENTICATING -> REPLAYING -> LIVE
 
 ### 9.7 Heartbeat
 
-- The server sends `ping` every 15 seconds. The client replies `pong` within 10 seconds or the server closes the connection.
+- The server sends `ping` every 15 seconds. The client replies `pong` within 10 seconds or the server closes the connection with code 4409; the client should reconnect and re-subscribe from its last `seq`.
 - A `pong` from the controller renews the control lease (section 11).
 
 ### 9.8 Presence
@@ -448,6 +448,7 @@ CONNECTING -> AUTHENTICATING -> REPLAYING -> LIVE
 | 4401 | Unauthenticated (bad, expired, or reused ticket) |
 | 4403 | Forbidden (user removed from the organization or role revoked) |
 | 4408 | Authentication timeout |
+| 4409 | Heartbeat timeout (no pong received within 10 seconds) |
 | 4420 | Slow consumer buffer overflow |
 | 4429 | Rate limited |
 | 4500 | Internal server error (client should reconnect) |
