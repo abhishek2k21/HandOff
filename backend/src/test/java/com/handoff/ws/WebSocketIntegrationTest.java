@@ -129,6 +129,7 @@ public class WebSocketIntegrationTest extends AbstractIntegrationTest {
         handOffWebSocketHandler.setTestHookBeforeHistoryRead(null);
         handOffWebSocketHandler.setTestHookBeforeBufferFlush(null);
         redisStreamPublisher.setTestDropFilter(null);
+        redisStreamListener.setTestReadException(null);
         reconciliationService.setEnabled(true);
     }
 
@@ -137,6 +138,7 @@ public class WebSocketIntegrationTest extends AbstractIntegrationTest {
         handOffWebSocketHandler.setMaxSubscriptionsPerConnection(20);
         handOffWebSocketHandler.setMaxSubscribersPerSession(200);
         redisStreamPublisher.setTestDropFilter(null);
+        redisStreamListener.setTestReadException(null);
         for (TestWsClient client : openClients) {
             client.close();
         }
@@ -1205,16 +1207,30 @@ public class WebSocketIntegrationTest extends AbstractIntegrationTest {
         assertNotNull(client.nextMessage(3, TimeUnit.SECONDS)); // subscribed
         assertNotNull(client.nextMessage(3, TimeUnit.SECONDS)); // caught_up
 
-        // Kill normal Redis client connections from inside Redis container to simulate connection failure
-        REDIS.execInContainer("redis-cli", "client", "kill", "type", "normal", "skipme", "no");
+        // Disable reconciliation so delivery can ONLY come from the recovered Redis reader
+        reconciliationService.setEnabled(false);
+        try {
+            // Trigger Redis read error via test hook; reader catches it, backs off, reconnects and restarts
+            redisStreamListener.setTestReadException(new org.springframework.data.redis.RedisSystemException(
+                    "Simulated Redis read failure", new RuntimeException("connection reset")));
 
-        // Append an event after Redis connection error; reader must recover and deliver it
-        appendEventInTx(sessionId, "AGENT_TEXT", "after-error");
+            long start = System.currentTimeMillis();
 
-        JsonNode eventMsg = client.nextMessage(5, TimeUnit.SECONDS);
-        assertNotNull(eventMsg, "Delivery must resume after reader restart");
-        assertEquals("event", eventMsg.get("op").asText());
-        assertEquals(1L, eventMsg.get("event").get("seq").asLong());
+            // Append an event after Redis connection error; reader must recover and deliver it
+            appendEventInTx(sessionId, "AGENT_TEXT", "after-error");
+
+            // Event must arrive via the Redis reader, well under the 2-second reconciliation interval
+            JsonNode eventMsg = client.nextMessage(2, TimeUnit.SECONDS);
+            long elapsed = System.currentTimeMillis() - start;
+
+            assertNotNull(eventMsg, "Delivery must resume after reader restart");
+            assertEquals("event", eventMsg.get("op").asText());
+            assertEquals(1L, eventMsg.get("event").get("seq").asLong());
+            assertTrue(elapsed < 1500, "Event must arrive via Redis reader well under 2s (elapsed: " + elapsed + "ms)");
+        } finally {
+            reconciliationService.setEnabled(true);
+            redisStreamListener.setTestReadException(null);
+        }
     }
 
     @Test

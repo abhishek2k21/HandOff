@@ -24,11 +24,11 @@ import org.testcontainers.containers.PostgreSQLContainer;
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 public abstract class AbstractIntegrationTest {
 
-    protected static final PostgreSQLContainer<?> POSTGRES =
+    static final PostgreSQLContainer<?> POSTGRES =
             new PostgreSQLContainer<>("postgres:16-alpine");
 
     @SuppressWarnings("resource") // container is closed by Testcontainers shutdown hook
-    protected static final GenericContainer<?> REDIS =
+    static final GenericContainer<?> REDIS =
             new GenericContainer<>("redis:7-alpine").withExposedPorts(6379);
 
     static {

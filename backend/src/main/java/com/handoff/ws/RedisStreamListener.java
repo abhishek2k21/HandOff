@@ -50,6 +50,11 @@ public class RedisStreamListener implements Runnable {
 
     private volatile boolean running = true;
     private Thread pollerThread;
+    private volatile RuntimeException testReadException = null;
+
+    public void setTestReadException(RuntimeException ex) {
+        this.testReadException = ex;
+    }
 
     public RedisStreamListener(RedisConnectionFactory connectionFactory, ObjectMapper objectMapper) {
         this.connectionFactory = connectionFactory;
@@ -164,6 +169,11 @@ public class RedisStreamListener implements Runnable {
 
                     List<ByteRecord> records;
                     try {
+                        RuntimeException injected = testReadException;
+                        if (injected != null) {
+                            testReadException = null;
+                            throw injected;
+                        }
                         records = connection.streamCommands().xRead(
                                 StreamReadOptions.empty().block(BLOCK_TIMEOUT).count(100),
                                 offsets
