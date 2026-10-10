@@ -7,7 +7,7 @@
 | **0** | **Project Skeleton** | **DONE** (merged) | Docker Compose (PostgreSQL 16, Redis 7), Flyway V1 migration (V1__create_core_tables.sql: sessions, events, approvals, commands with triggers), Spring Boot 3 MVC with JDBC, HealthController, temporary WS echo handler, React 19 + TypeScript frontend with health check UI, CI pipeline. |
 | **1** | **Authentication & Roles** | **DONE** | V2 migration (organizations, users, memberships, refresh_tokens), register, login, refresh, logout, roles (VIEWER, OPERATOR, APPROVER, ADMIN), one-time WebSocket ticket (`POST /api/ws-ticket`), dev seed data, login & register UI with Zustand store, memory-only access token, persistent refresh token in localStorage, single-flight in-tab refresh, and multi-tab Web Lock coordination. |
 | **2** | **Sessions & Scripted Agent** | **DONE** | V3 migration (tickets, orders), EventStore.append with gapless seq (T1, T2), session REST API, ToolRuntime allowlist, SIMPLE_LOOKUP & LONG_STREAM scenarios, SessionsPage with ticket selector & status badges, SessionDetailPage with polling event log (1s) and compact row rendering. |
-| 3 | Event Log & Real WebSocket | IN PROGRESS | Stage A: WebSocket protocol core (R1, ticket auth, replay batches, live Redis stream). Stage B: Backend hardening (reconciliation job, slow-consumer 4420, connection/session limits, heartbeat, resilience). |
+| **3** | **Event Log & Real WebSocket** | **DONE** | Stage A: WebSocket protocol core (R1, ticket auth, replay batches, live Redis stream). Stage B: Backend hardening (reconciliation job, slow-consumer 4420, connection/session limits, heartbeat 4409, resilience). |
 | 4 | Replay & Reconnect | UPCOMING | Frontend WebSocket client, Zustand event store, React timeline (R2). |
 | 5 | Control & Intervention | UPCOMING | Single controller lease with Redis Lua (R4), steer, pause, resume, takeover, hand-off. |
 | 6 | Approval Gates | UPCOMING | Risky tool approval flow (R3, R6), approval queue UI, timeout job. |
@@ -95,7 +95,19 @@ npm run build
 
 ---
 
-## 5. Deployment TODO
+## 5. Slice 3: Event Log & Real WebSocket (Completed)
+
+- **Stage A:** WebSocket protocol core (96 tests at the time).
+- **B1:** reconciliation job.
+- **B2:** limits, heartbeat (close code 4409), origin checks.
+- **B3:** hardening tests; the redis reader test uses a test hook that makes the reader throw once and never touches the shared Redis container.
+- **Totals:** 112 backend tests, 24 frontend tests.
+- **Live browser check passed:** joined a running LONG_STREAM, received seq 1 to 2003 with 0 duplicates, 0 out of order, 0 missing.
+- **Not done yet:** push, pull request, CI result, slice 4 (frontend WebSocket client).
+
+---
+
+## 6. Deployment TODO
 
 Behind a reverse proxy, every client looks like the proxy's address. In slice 10, configure Tomcat remote IP handling (`server.forward-headers-strategy=native` with `server.tomcat.remoteip.internal-proxies` limited to the proxy's address) and make the proxy overwrite `X-Forwarded-For`. Verify against the Spring Boot documentation first. Add a test for it.
 

@@ -453,6 +453,8 @@ CONNECTING -> AUTHENTICATING -> REPLAYING -> LIVE
 | 4429 | Rate limited |
 | 4500 | Internal server error (client should reconnect) |
 
+A client that cannot keep up is closed with 4420 on a live stream, including when the reconciliation job has to send it a large gap, and should reconnect and resubscribe from its last `seq`.
+
 ---
 
 ## 10. Sequencing and Persistence
