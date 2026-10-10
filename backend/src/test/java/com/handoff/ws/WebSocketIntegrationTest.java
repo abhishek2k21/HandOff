@@ -15,6 +15,7 @@ import com.handoff.agent.ToolExecutionService;
 import com.handoff.auth.Role;
 import com.handoff.auth.UserPrincipal;
 import com.handoff.auth.WsTicketService;
+import com.handoff.events.Actor;
 import com.handoff.events.ActorKind;
 import com.handoff.events.Event;
 import com.handoff.events.EventStore;
@@ -28,6 +29,7 @@ import com.handoff.session.SessionService;
 import com.handoff.session.SessionStatus;
 import com.handoff.ticket.Ticket;
 import com.handoff.ticket.TicketRepository;
+import com.handoff.ws.protocol.WsMessage;
 import java.io.IOException;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -42,6 +44,7 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -61,9 +64,11 @@ import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketHttpHeaders;
+import org.springframework.web.socket.WebSocketMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.client.standard.StandardWebSocketClient;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
+import org.springframework.web.socket.handler.WebSocketSessionDecorator;
 
 public class WebSocketIntegrationTest extends AbstractIntegrationTest {
 
@@ -128,6 +133,7 @@ public class WebSocketIntegrationTest extends AbstractIntegrationTest {
         handOffWebSocketHandler.setTestHookAfterRegistrationBeforeReaderActivation(null);
         handOffWebSocketHandler.setTestHookBeforeHistoryRead(null);
         handOffWebSocketHandler.setTestHookBeforeBufferFlush(null);
+        handOffWebSocketHandler.setTestHookRawSessionDecorator(null);
         redisStreamPublisher.setTestDropFilter(null);
         redisStreamListener.setTestReadException(null);
         reconciliationService.setEnabled(true);
@@ -146,6 +152,7 @@ public class WebSocketIntegrationTest extends AbstractIntegrationTest {
         handOffWebSocketHandler.setTestHookAfterRegistrationBeforeReaderActivation(null);
         handOffWebSocketHandler.setTestHookBeforeHistoryRead(null);
         handOffWebSocketHandler.setTestHookBeforeBufferFlush(null);
+        handOffWebSocketHandler.setTestHookRawSessionDecorator(null);
     }
 
     // ==========================================
@@ -829,6 +836,133 @@ public class WebSocketIntegrationTest extends AbstractIntegrationTest {
 
         CloseStatus status = client.closeFuture.get(5, TimeUnit.SECONDS);
         assertEquals(4420, status.getCode(), "Slow consumer buffer overflow must close connection with 4420");
+    }
+
+    @Test
+    void realSlowConsumerStopsReadingOnLiveStreamClosesWith4420() throws Exception {
+        UUID orgId = createTestOrg();
+        UUID userId = createTestUser(orgId, Role.OPERATOR);
+        UUID sessionId = createTestSession(orgId, userId);
+        String ticket = createWsTicket(userId, orgId, Role.OPERATOR, "Alice");
+
+        handOffWebSocketHandler.setBufferMaxCap(100);
+        handOffWebSocketHandler.setSendBufferSizeLimit(200);
+
+        CountDownLatch firstMessageBlocked = new CountDownLatch(1);
+        CountDownLatch releaseFirstMessage = new CountDownLatch(1);
+
+        handOffWebSocketHandler.setTestHookRawSessionDecorator(raw -> new WebSocketSessionDecorator(raw) {
+            @Override
+            public void sendMessage(WebSocketMessage<?> message) throws IOException {
+                if (message.getPayload().toString().contains("slow-live-1")) {
+                    firstMessageBlocked.countDown();
+                    try {
+                        releaseFirstMessage.await(5, TimeUnit.SECONDS);
+                    } catch (InterruptedException ignored) {}
+                }
+                super.sendMessage(message);
+            }
+        });
+
+        try {
+            TestWsClient client = connectAndAuth(ticket);
+            client.nextMessage(3, TimeUnit.SECONDS); // auth_ok
+
+            client.send("{\"op\":\"subscribe\",\"sessionId\":\"" + sessionId + "\",\"fromSeq\":0}");
+            JsonNode subMsg = client.nextMessage(3, TimeUnit.SECONDS); // subscribed
+            assertNotNull(subMsg);
+            JsonNode caughtUp = client.nextMessage(3, TimeUnit.SECONDS); // caught_up
+            assertNotNull(caughtUp);
+
+            // Send first live event: gets intercepted by callback and holds send in progress
+            Event ev1 = new Event(
+                    sessionId,
+                    1L,
+                    "AGENT_TEXT",
+                    new Actor(ActorKind.AGENT, "agent", "Agent"),
+                    null,
+                    Map.of("text", "slow-live-1"),
+                    java.time.Instant.now()
+            );
+            redisStreamPublisher.publish(ev1);
+
+            // Wait until first message is in-flight (holding decorator lock)
+            assertTrue(firstMessageBlocked.await(5, TimeUnit.SECONDS), "First message must be in-flight");
+
+            // Retrieve active subscription
+            SessionSubscription sub = handOffWebSocketHandler.getSubscriptionForSession(sessionId);
+            assertNotNull(sub);
+
+            // Send second message while first send is blocked in-flight
+            Event ev2 = new Event(
+                    sessionId,
+                    2L,
+                    "AGENT_TEXT",
+                    new Actor(ActorKind.AGENT, "agent", "Agent"),
+                    null,
+                    Map.of("text", "slow-live-2-" + "X".repeat(500)),
+                    java.time.Instant.now()
+            );
+            try {
+                sub.sendMessage(new WsMessage.LiveEventResponse(ev2));
+            } catch (Exception ignored) {}
+
+            // Unblock first message so connection can cleanly deliver close
+            releaseFirstMessage.countDown();
+
+            // Client must be closed with exactly 4420 (not 1008 from decorator)
+            CloseStatus status = client.closeFuture.get(5, TimeUnit.SECONDS);
+            assertEquals(4420, status.getCode(), "Real slow consumer must be closed with exactly 4420");
+        } finally {
+            releaseFirstMessage.countDown();
+            handOffWebSocketHandler.setBufferMaxCap(524288);
+            handOffWebSocketHandler.setSendBufferSizeLimit(1048576);
+            handOffWebSocketHandler.setTestHookRawSessionDecorator(null);
+        }
+    }
+
+    @Test
+    void replayFailureClosesWith4500AndFreesSubscriberSlot() throws Exception {
+        UUID orgId = createTestOrg();
+        UUID userId = createTestUser(orgId, Role.OPERATOR);
+        UUID sessionId = createTestSession(orgId, userId);
+        String ticket = createWsTicket(userId, orgId, Role.OPERATOR, "Alice");
+
+        // Seed an event so replay will call getEvents
+        appendEventInTx(sessionId, "AGENT_TEXT", "hello");
+
+        // Force getEvents to throw during replay
+        ((com.handoff.events.JdbcEventStore) eventStore).setTestGetEventsException(
+                new RuntimeException("Simulated database failure during replay"));
+
+        // Set max subscribers per session to 1 to verify subscriber slot is freed
+        handOffWebSocketHandler.setMaxSubscribersPerSession(1);
+        try {
+            TestWsClient client = connectAndAuth(ticket);
+            client.nextMessage(3, TimeUnit.SECONDS); // auth_ok
+
+            client.send("{\"op\":\"subscribe\",\"sessionId\":\"" + sessionId + "\",\"fromSeq\":0}");
+
+            CloseStatus status = client.closeFuture.get(3, TimeUnit.SECONDS);
+            assertEquals(4500, status.getCode(), "Replay failure must close connection with 4500");
+
+            // Verify subscriber slot was freed: another client can subscribe without RATE_LIMITED
+            UUID u2 = createTestUser(orgId, Role.OPERATOR);
+            String t2 = createWsTicket(u2, orgId, Role.OPERATOR, "Bob");
+            TestWsClient client2 = connectAndAuth(t2);
+            client2.nextMessage(3, TimeUnit.SECONDS); // auth_ok
+
+            client2.send("{\"op\":\"subscribe\",\"sessionId\":\"" + sessionId + "\",\"fromSeq\":0}");
+            JsonNode subResp = client2.nextMessage(3, TimeUnit.SECONDS);
+            assertNotNull(subResp);
+            assertEquals("subscribed", subResp.get("op").asText(), "Subscriber slot must be freed on replay failure");
+            assertNotNull(client2.nextMessage(3, TimeUnit.SECONDS)); // events
+            assertNotNull(client2.nextMessage(3, TimeUnit.SECONDS)); // caught_up
+            client2.close();
+        } finally {
+            handOffWebSocketHandler.setMaxSubscribersPerSession(200);
+            ((com.handoff.events.JdbcEventStore) eventStore).setTestGetEventsException(null);
+        }
     }
 
     // ==========================================

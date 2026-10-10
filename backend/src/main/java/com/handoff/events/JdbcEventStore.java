@@ -35,6 +35,11 @@ public class JdbcEventStore implements EventStore {
     private final SessionStatusReducer sessionStatusReducer;
     private final RedisStreamPublisher redisStreamPublisher;
     private final RowMapper<Event> eventRowMapper;
+    private volatile RuntimeException testGetEventsException = null;
+
+    public void setTestGetEventsException(RuntimeException ex) {
+        this.testGetEventsException = ex;
+    }
 
     public JdbcEventStore(
             JdbcTemplate jdbc,
@@ -178,6 +183,11 @@ public class JdbcEventStore implements EventStore {
 
     @Override
     public List<Event> getEvents(UUID sessionId, long fromSeq, int limit) {
+        RuntimeException ex = testGetEventsException;
+        if (ex != null) {
+            testGetEventsException = null;
+            throw ex;
+        }
         String sql = """
             SELECT session_id, seq, type, actor_kind, actor_id, actor_name, command_id, payload, created_at
               FROM events

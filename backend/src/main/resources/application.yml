@@ -36,6 +36,9 @@ handoff:
     heartbeat-tick-ms: ${WS_HEARTBEAT_TICK_MS:1000}
     max-subscriptions-per-connection: ${WS_MAX_SUBSCRIPTIONS_PER_CONNECTION:20}
     max-subscribers-per-session: ${WS_MAX_SUBSCRIBERS_PER_SESSION:200}
+    send-time-limit-ms: ${WS_SEND_TIME_LIMIT_MS:5000}
+    send-buffer-size-limit: ${WS_SEND_BUFFER_SIZE_LIMIT:1048576}
+    buffer-max-cap: ${WS_BUFFER_MAX_CAP:524288}
   demo-data:
     enabled: ${DEMO_DATA_ENABLED:false}
     reset-on-start: ${DEMO_DATA_RESET_ON_START:false}

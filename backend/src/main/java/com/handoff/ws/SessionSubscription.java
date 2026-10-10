@@ -20,7 +20,9 @@ import java.util.concurrent.locks.ReentrantLock;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.web.socket.TextMessage;
+import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.ConcurrentWebSocketSessionDecorator;
+import org.springframework.web.socket.handler.SessionLimitExceededException;
 
 /**
  * Manages an individual client's subscription to a session.
@@ -39,7 +41,8 @@ public class SessionSubscription {
     private static final int MAX_BATCH_BYTES = 256 * 1024; // 256 KB
     private static final int QUEUE_CAPACITY = 500;
     private static final int BUFFER_LOW_WATER_MARK = 64 * 1024; // 64 KB
-    private static final int BUFFER_MAX_CAP = 512 * 1024; // 512 KB
+    public static final int DEFAULT_BUFFER_MAX_CAP = 512 * 1024; // 512 KB
+    private volatile int bufferMaxCap = DEFAULT_BUFFER_MAX_CAP;
     private static final long BUFFER_DRAIN_TIMEOUT_MS = 5000;
 
     public enum State {
@@ -238,8 +241,22 @@ public class SessionSubscription {
             // 4. Transition to LIVE
             state = State.LIVE;
 
+        } catch (SessionLimitExceededException ex) {
+            log.warn("Replay slow consumer for session {} conn {}. Already closing 4420.", sessionId, session.getId());
+            cancel();
+            streamListener.unregister(this);
         } catch (Exception ex) {
             log.error("Error during replay for session {} conn {}", sessionId, session.getId(), ex);
+            try {
+                String errJson = objectMapper.writeValueAsString(
+                        new WsMessage.ErrorResponse(null, "INTERNAL_ERROR", "Replay failed", null));
+                session.sendMessage(new TextMessage(errJson));
+            } catch (Exception ignored) {}
+            cancel();
+            streamListener.unregister(this);
+            try {
+                session.getDelegate().close(HandOffWebSocketHandler.STATUS_INTERNAL_ERROR);
+            } catch (IOException ignored) {}
         } finally {
             lock.unlock();
         }
@@ -301,8 +318,13 @@ public class SessionSubscription {
             } finally {
                 lock.unlock();
             }
+        } catch (SessionLimitExceededException ex) {
+            log.warn("Session limit exceeded while draining live queue for session {} conn {}. Closing 4420.",
+                    sessionId, session.getId());
+            closeSlowConsumer();
         } catch (Exception ex) {
-            log.error("Error draining live queue for session {} conn {}", sessionId, session.getId(), ex);
+            log.error("Error draining live queue for session {} conn {}. Closing 4420.", sessionId, session.getId(), ex);
+            closeSlowConsumer();
         } finally {
             isWorkerRunning.set(false);
             if (!liveQueue.isEmpty() || behind) {
@@ -329,9 +351,14 @@ public class SessionSubscription {
                 if (lastSentSeq < targetLastSeq) {
                     fillGapFromDatabase(lastSentSeq, targetLastSeq);
                 }
+            } catch (SessionLimitExceededException ex) {
+                log.warn("Session limit exceeded during reconciliation catch-up for session {} conn {}. Closing 4420.",
+                        sessionId, session.getId());
+                closeSlowConsumer();
             } catch (Exception ex) {
-                log.error("Error during reconciliation catch-up for session {} conn {}",
+                log.error("Error during reconciliation catch-up for session {} conn {}. Closing 4420.",
                         sessionId, session.getId(), ex);
+                closeSlowConsumer();
             } finally {
                 lock.unlock();
             }
@@ -386,8 +413,9 @@ public class SessionSubscription {
 
     public void closeSlowConsumer() {
         cancel();
+        streamListener.unregister(this);
         try {
-            session.close(HandOffWebSocketHandler.STATUS_SLOW_CONSUMER);
+            session.getDelegate().close(HandOffWebSocketHandler.STATUS_SLOW_CONSUMER);
         } catch (IOException ignored) {}
     }
 
@@ -396,14 +424,34 @@ public class SessionSubscription {
             return;
         }
 
-        if (session.getBufferSize() > BUFFER_MAX_CAP) {
-            log.warn("Slow consumer buffer cap exceeded ({} bytes) for session {} conn {}. Closing 4420.",
-                    session.getBufferSize(), sessionId, session.getId());
+        if (session.getBufferSize() > bufferMaxCap) {
+            log.warn("Slow consumer buffer cap exceeded ({} bytes > {} bytes) for session {} conn {}. Closing 4420.",
+                    session.getBufferSize(), bufferMaxCap, sessionId, session.getId());
             closeSlowConsumer();
             return;
         }
 
         String json = objectMapper.writeValueAsString(payload);
-        session.sendMessage(new TextMessage(json));
+        try {
+            session.sendMessage(new TextMessage(json));
+        } catch (SessionLimitExceededException ex) {
+            log.warn("SessionLimitExceededException for session {} conn {}. Closing delegate with 4420.",
+                    sessionId, session.getId());
+            closeSlowConsumer();
+            throw ex;
+        } catch (IllegalStateException ex) {
+            log.warn("Endpoint write error for session {} conn {}. Closing delegate with 4420.",
+                    sessionId, session.getId());
+            closeSlowConsumer();
+            throw ex;
+        }
+    }
+
+    public void setBufferMaxCap(int bufferMaxCap) {
+        this.bufferMaxCap = bufferMaxCap;
+    }
+
+    public int getBufferMaxCap() {
+        return this.bufferMaxCap;
     }
 }

@@ -29,6 +29,7 @@ import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.ConcurrentWebSocketSessionDecorator;
+import org.springframework.web.socket.handler.SessionLimitExceededException;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
 /**
@@ -49,6 +50,7 @@ public class HandOffWebSocketHandler extends TextWebSocketHandler {
     public static final CloseStatus STATUS_MESSAGE_TOO_BIG = new CloseStatus(1009, "Message too big");
     public static final CloseStatus STATUS_SLOW_CONSUMER = new CloseStatus(4420, "Slow consumer buffer overflow");
     public static final CloseStatus STATUS_HEARTBEAT_TIMEOUT = new CloseStatus(4409, "Heartbeat timeout");
+    public static final CloseStatus STATUS_INTERNAL_ERROR = new CloseStatus(4500, "Internal server error");
 
     private final WsTicketService wsTicketService;
     private final EventStore eventStore;
@@ -61,6 +63,9 @@ public class HandOffWebSocketHandler extends TextWebSocketHandler {
     private volatile long heartbeatTickMs;
     private volatile int maxSubscriptionsPerConnection;
     private volatile int maxSubscribersPerSession;
+    private volatile int sendTimeLimitMs;
+    private volatile int sendBufferSizeLimit;
+    private volatile int bufferMaxCap;
 
     public void setAuthTimeoutSeconds(long authTimeoutSeconds) {
         this.authTimeoutSeconds = authTimeoutSeconds;
@@ -74,6 +79,30 @@ public class HandOffWebSocketHandler extends TextWebSocketHandler {
         this.maxSubscribersPerSession = max;
     }
 
+    public void setSendTimeLimitMs(int ms) {
+        this.sendTimeLimitMs = ms;
+    }
+
+    public void setSendBufferSizeLimit(int bytes) {
+        this.sendBufferSizeLimit = bytes;
+    }
+
+    public void setBufferMaxCap(int bytes) {
+        this.bufferMaxCap = bytes;
+    }
+
+    public int getSendTimeLimitMs() {
+        return this.sendTimeLimitMs;
+    }
+
+    public int getSendBufferSizeLimit() {
+        return this.sendBufferSizeLimit;
+    }
+
+    public int getBufferMaxCap() {
+        return this.bufferMaxCap;
+    }
+
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
     private final Executor subscriptionExecutor = Executors.newVirtualThreadPerTaskExecutor();
     private final ScheduledFuture<?> heartbeatFuture;
@@ -85,6 +114,7 @@ public class HandOffWebSocketHandler extends TextWebSocketHandler {
     Runnable testHookAfterRegistrationBeforeReaderActivation = null;
     Runnable testHookBeforeHistoryRead = null;
     Runnable testHookBeforeBufferFlush = null;
+    java.util.function.Function<org.springframework.web.socket.WebSocketSession, org.springframework.web.socket.WebSocketSession> testHookRawSessionDecorator = null;
 
     public void setTestHookAfterRegistrationBeforeReaderActivation(Runnable r) {
         this.testHookAfterRegistrationBeforeReaderActivation = r;
@@ -96,6 +126,10 @@ public class HandOffWebSocketHandler extends TextWebSocketHandler {
 
     public void setTestHookBeforeBufferFlush(Runnable r) {
         this.testHookBeforeBufferFlush = r;
+    }
+
+    public void setTestHookRawSessionDecorator(java.util.function.Function<org.springframework.web.socket.WebSocketSession, org.springframework.web.socket.WebSocketSession> fn) {
+        this.testHookRawSessionDecorator = fn;
     }
 
     private static class ConnectionState {
@@ -126,7 +160,10 @@ public class HandOffWebSocketHandler extends TextWebSocketHandler {
             @Value("${handoff.ws.pong-timeout-ms:10000}") long pongTimeoutMs,
             @Value("${handoff.ws.heartbeat-tick-ms:1000}") long heartbeatTickMs,
             @Value("${handoff.ws.max-subscriptions-per-connection:20}") int maxSubscriptionsPerConnection,
-            @Value("${handoff.ws.max-subscribers-per-session:200}") int maxSubscribersPerSession
+            @Value("${handoff.ws.max-subscribers-per-session:200}") int maxSubscribersPerSession,
+            @Value("${handoff.ws.send-time-limit-ms:5000}") int sendTimeLimitMs,
+            @Value("${handoff.ws.send-buffer-size-limit:1048576}") int sendBufferSizeLimit,
+            @Value("${handoff.ws.buffer-max-cap:524288}") int bufferMaxCap
     ) {
         this.wsTicketService = wsTicketService;
         this.eventStore = eventStore;
@@ -139,6 +176,9 @@ public class HandOffWebSocketHandler extends TextWebSocketHandler {
         this.heartbeatTickMs = heartbeatTickMs;
         this.maxSubscriptionsPerConnection = maxSubscriptionsPerConnection;
         this.maxSubscribersPerSession = maxSubscribersPerSession;
+        this.sendTimeLimitMs = sendTimeLimitMs;
+        this.sendBufferSizeLimit = sendBufferSizeLimit;
+        this.bufferMaxCap = bufferMaxCap;
 
         this.heartbeatFuture = this.scheduler.scheduleWithFixedDelay(
                 this::heartbeatTick,
@@ -178,6 +218,8 @@ public class HandOffWebSocketHandler extends TextWebSocketHandler {
                 subscriptionExecutor.execute(() -> {
                     try {
                         sendMessage(state.session, new WsMessage.PingMessage());
+                    } catch (SessionLimitExceededException ex) {
+                        log.warn("Slow consumer on ping for connId={}. Closed with 4420.", state.session.getId());
                     } catch (Exception ex) {
                         if (state.closing.compareAndSet(false, true)) {
                             try {
@@ -192,9 +234,12 @@ public class HandOffWebSocketHandler extends TextWebSocketHandler {
 
     @Override
     public void afterConnectionEstablished(WebSocketSession rawSession) {
-        // Wrap in thread-safe decorator: 5s send limit, 512 KB buffer cap
+        // Wrap in thread-safe decorator: sendTimeLimitMs send limit, sendBufferSizeLimit buffer cap
+        WebSocketSession delegateSession = testHookRawSessionDecorator != null
+                ? testHookRawSessionDecorator.apply(rawSession)
+                : rawSession;
         ConcurrentWebSocketSessionDecorator session =
-                new ConcurrentWebSocketSessionDecorator(rawSession, 5000, 512 * 1024);
+                new ConcurrentWebSocketSessionDecorator(delegateSession, sendTimeLimitMs, sendBufferSizeLimit);
 
         String connId = session.getId();
         log.info("WebSocket connected: connId={}", connId);
@@ -257,12 +302,16 @@ public class HandOffWebSocketHandler extends TextWebSocketHandler {
         }
 
         // 2. Authenticated Operations
-        switch (op) {
-            case "subscribe" -> handleSubscribe(state, root);
-            case "unsubscribe" -> handleUnsubscribe(state, root);
-            case "pong" -> handlePong(state);
-            case "command" -> handleCommand(state, root);
-            default -> sendError(state.session, null, "VALIDATION_FAILED", "Unknown op: " + op, null);
+        try {
+            switch (op) {
+                case "subscribe" -> handleSubscribe(state, root);
+                case "unsubscribe" -> handleUnsubscribe(state, root);
+                case "pong" -> handlePong(state);
+                case "command" -> handleCommand(state, root);
+                default -> sendError(state.session, null, "VALIDATION_FAILED", "Unknown op: " + op, null);
+            }
+        } catch (SessionLimitExceededException ex) {
+            log.warn("Session limit exceeded in handleTextMessage for connId={}. Closed with 4420.", connId);
         }
     }
 
@@ -359,6 +408,7 @@ public class HandOffWebSocketHandler extends TextWebSocketHandler {
         newSub.testHookAfterRegistrationBeforeReaderActivation = this.testHookAfterRegistrationBeforeReaderActivation;
         newSub.testHookBeforeHistoryRead = this.testHookBeforeHistoryRead;
         newSub.testHookBeforeBufferFlush = this.testHookBeforeBufferFlush;
+        newSub.setBufferMaxCap(this.bufferMaxCap);
 
         SessionSubscription oldSub = state.subscriptions.get(sessionId);
         boolean registered = redisStreamListener.tryRegister(newSub, oldSub, maxSubscribersPerSession);
@@ -438,9 +488,37 @@ public class HandOffWebSocketHandler extends TextWebSocketHandler {
         return null;
     }
 
+    public void closeSlowConsumer(WebSocketSession session) {
+        String connId = session.getId();
+        ConnectionState state = connections.remove(connId);
+        if (state != null) {
+            if (state.authTimeoutTask != null) {
+                state.authTimeoutTask.cancel(false);
+            }
+            for (SessionSubscription sub : state.subscriptions.values()) {
+                sub.cancel();
+                redisStreamListener.unregister(sub);
+            }
+            state.subscriptions.clear();
+        }
+        try {
+            if (session instanceof ConcurrentWebSocketSessionDecorator decorator) {
+                decorator.getDelegate().close(STATUS_SLOW_CONSUMER);
+            } else {
+                session.close(STATUS_SLOW_CONSUMER);
+            }
+        } catch (IOException ignored) {}
+    }
+
     private void sendMessage(WebSocketSession session, Object payload) throws IOException {
         if (!session.isOpen()) return;
         String json = objectMapper.writeValueAsString(payload);
-        session.sendMessage(new TextMessage(json));
+        try {
+            session.sendMessage(new TextMessage(json));
+        } catch (SessionLimitExceededException ex) {
+            log.warn("SessionLimitExceededException sending to conn {}. Closing delegate with 4420.", session.getId());
+            closeSlowConsumer(session);
+            throw ex;
+        }
     }
 }
