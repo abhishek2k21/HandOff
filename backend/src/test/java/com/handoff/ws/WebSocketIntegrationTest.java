@@ -254,6 +254,16 @@ public class WebSocketIntegrationTest extends AbstractIntegrationTest {
         JsonNode err = client.nextMessage(3, TimeUnit.SECONDS);
         assertEquals("error", err.get("op").asText());
         assertEquals("INVALID_SEQUENCE", err.get("code").asText());
+
+        // Connection stays open; valid subscription succeeds
+        assertTrue(client.isOpen());
+        client.send("{\"op\":\"subscribe\",\"sessionId\":\"" + sessionId + "\",\"fromSeq\":0}");
+        JsonNode subResp = client.nextMessage(3, TimeUnit.SECONDS);
+        assertNotNull(subResp);
+        assertEquals("subscribed", subResp.get("op").asText());
+        JsonNode caughtUp = client.nextMessage(3, TimeUnit.SECONDS);
+        assertNotNull(caughtUp);
+        assertEquals("caught_up", caughtUp.get("op").asText());
     }
 
     @Test
@@ -1095,6 +1105,215 @@ public class WebSocketIntegrationTest extends AbstractIntegrationTest {
     }
 
     // ==========================================
+    // Hardening Tests (Stage B Piece 3)
+    // ==========================================
+
+    @Test
+    void malformedJsonUnknownOpAndCommandReturnValidationFailedAndKeepConnectionOpen() throws Exception {
+        UUID orgId = createTestOrg();
+        UUID userId = createTestUser(orgId, Role.OPERATOR);
+        UUID sessionId = createTestSession(orgId, userId);
+        String ticket = createWsTicket(userId, orgId, Role.OPERATOR, "Alice");
+
+        TestWsClient client = connectAndAuth(ticket);
+        client.nextMessage(3, TimeUnit.SECONDS); // auth_ok
+
+        // 1. Malformed JSON
+        client.send("{not-valid-json");
+        JsonNode err1 = client.nextMessage(3, TimeUnit.SECONDS);
+        assertNotNull(err1);
+        assertEquals("error", err1.get("op").asText());
+        assertEquals("VALIDATION_FAILED", err1.get("code").asText());
+        assertTrue(client.isOpen());
+
+        // 2. Unknown op
+        client.send("{\"op\":\"fly_to_moon\"}");
+        JsonNode err2 = client.nextMessage(3, TimeUnit.SECONDS);
+        assertNotNull(err2);
+        assertEquals("error", err2.get("op").asText());
+        assertEquals("VALIDATION_FAILED", err2.get("code").asText());
+        assertTrue(client.isOpen());
+
+        // 3. Command op (Slice 5 not yet enabled)
+        client.send("{\"op\":\"command\",\"id\":\"c-99\",\"type\":\"STEER\"}");
+        JsonNode err3 = client.nextMessage(3, TimeUnit.SECONDS);
+        assertNotNull(err3);
+        assertEquals("error", err3.get("op").asText());
+        assertEquals("VALIDATION_FAILED", err3.get("code").asText());
+        assertEquals("c-99", err3.get("id").asText());
+        assertTrue(client.isOpen());
+
+        // Prove connection is still fully functional: subscribe and get reply
+        client.send("{\"op\":\"subscribe\",\"sessionId\":\"" + sessionId + "\",\"fromSeq\":0}");
+        JsonNode subResp = client.nextMessage(3, TimeUnit.SECONDS);
+        assertNotNull(subResp);
+        assertEquals("subscribed", subResp.get("op").asText());
+        JsonNode caughtUp = client.nextMessage(3, TimeUnit.SECONDS);
+        assertNotNull(caughtUp);
+        assertEquals("caught_up", caughtUp.get("op").asText());
+        assertTrue(client.isOpen());
+    }
+
+    @Test
+    void queueOverflowMarksBehindAndCatchesUpFromPostgresWithoutLoss() throws Exception {
+        UUID orgId = createTestOrg();
+        UUID userId = createTestUser(orgId, Role.OPERATOR);
+        UUID sessionId = createTestSession(orgId, userId);
+        String ticket = createWsTicket(userId, orgId, Role.OPERATOR, "Alice");
+
+        TestWsClient client = connectAndAuth(ticket);
+        client.nextMessage(3, TimeUnit.SECONDS); // auth_ok
+
+        client.send("{\"op\":\"subscribe\",\"sessionId\":\"" + sessionId + "\",\"fromSeq\":0}");
+        assertNotNull(client.nextMessage(3, TimeUnit.SECONDS)); // subscribed
+        assertNotNull(client.nextMessage(3, TimeUnit.SECONDS)); // caught_up
+
+        SessionSubscription sub = handOffWebSocketHandler.getSubscriptionForSession(sessionId);
+        assertNotNull(sub);
+
+        // Force queue capacity to 2 via reflection so it overflows quickly
+        java.lang.reflect.Field qField = SessionSubscription.class.getDeclaredField("liveQueue");
+        qField.setAccessible(true);
+        BlockingQueue<Event> smallQueue = new LinkedBlockingQueue<>(2);
+        qField.set(sub, smallQueue);
+
+        // Append 5 events to PostgreSQL and Redis
+        for (int i = 1; i <= 5; i++) {
+            appendEventInTx(sessionId, "AGENT_TEXT", "msg-" + i);
+        }
+
+        // The client must receive all 5 events gapless and in order
+        for (int i = 1; i <= 5; i++) {
+            JsonNode msg = client.nextMessage(5, TimeUnit.SECONDS);
+            assertNotNull(msg, "Expected event seq " + i);
+            assertEquals("event", msg.get("op").asText());
+            assertEquals(i, msg.get("event").get("seq").asLong());
+        }
+    }
+
+    @Test
+    void redisReaderRecoversFromErrorAndDeliveryResumes() throws Exception {
+        UUID orgId = createTestOrg();
+        UUID userId = createTestUser(orgId, Role.OPERATOR);
+        UUID sessionId = createTestSession(orgId, userId);
+        String ticket = createWsTicket(userId, orgId, Role.OPERATOR, "Alice");
+
+        TestWsClient client = connectAndAuth(ticket);
+        client.nextMessage(3, TimeUnit.SECONDS); // auth_ok
+
+        client.send("{\"op\":\"subscribe\",\"sessionId\":\"" + sessionId + "\",\"fromSeq\":0}");
+        assertNotNull(client.nextMessage(3, TimeUnit.SECONDS)); // subscribed
+        assertNotNull(client.nextMessage(3, TimeUnit.SECONDS)); // caught_up
+
+        // Kill normal Redis client connections from inside Redis container to simulate connection failure
+        REDIS.execInContainer("redis-cli", "client", "kill", "type", "normal", "skipme", "no");
+
+        // Append an event after Redis connection error; reader must recover and deliver it
+        appendEventInTx(sessionId, "AGENT_TEXT", "after-error");
+
+        JsonNode eventMsg = client.nextMessage(5, TimeUnit.SECONDS);
+        assertNotNull(eventMsg, "Delivery must resume after reader restart");
+        assertEquals("event", eventMsg.get("op").asText());
+        assertEquals(1L, eventMsg.get("event").get("seq").asLong());
+    }
+
+    @Test
+    void subscribingWhileRedisReaderIsBlockedWorksImmediately() throws Exception {
+        UUID orgId = createTestOrg();
+        UUID userId = createTestUser(orgId, Role.OPERATOR);
+        UUID sessionId = createTestSession(orgId, userId);
+        String ticket = createWsTicket(userId, orgId, Role.OPERATOR, "Alice");
+
+        // The reader is currently blocked in XREAD block 500ms since no events exist
+        TestWsClient client = connectAndAuth(ticket);
+        client.nextMessage(3, TimeUnit.SECONDS); // auth_ok
+
+        long start = System.currentTimeMillis();
+        client.send("{\"op\":\"subscribe\",\"sessionId\":\"" + sessionId + "\",\"fromSeq\":0}");
+
+        JsonNode subResp = client.nextMessage(3, TimeUnit.SECONDS);
+        assertNotNull(subResp);
+        assertEquals("subscribed", subResp.get("op").asText());
+
+        JsonNode caughtUp = client.nextMessage(3, TimeUnit.SECONDS);
+        assertNotNull(caughtUp);
+        assertEquals("caught_up", caughtUp.get("op").asText());
+
+        long elapsed = System.currentTimeMillis() - start;
+        assertTrue(elapsed < 2000, "Subscribing must not be delayed by blocked Redis reader");
+    }
+
+    @Test
+    void redisReaderStopsReadingStreamWhenZeroSubscribers() throws Exception {
+        UUID orgId = createTestOrg();
+        UUID userId = createTestUser(orgId, Role.OPERATOR);
+        UUID sessionId = createTestSession(orgId, userId);
+        String ticket = createWsTicket(userId, orgId, Role.OPERATOR, "Alice");
+
+        String streamKey = RedisStreamPublisher.getStreamKey(sessionId);
+
+        java.lang.reflect.Field offsetsField = RedisStreamListener.class.getDeclaredField("streamOffsets");
+        offsetsField.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        ConcurrentHashMap<String, String> streamOffsets =
+                (ConcurrentHashMap<String, String>) offsetsField.get(redisStreamListener);
+
+        TestWsClient client = connectAndAuth(ticket);
+        client.nextMessage(3, TimeUnit.SECONDS); // auth_ok
+
+        client.send("{\"op\":\"subscribe\",\"sessionId\":\"" + sessionId + "\",\"fromSeq\":0}");
+        assertNotNull(client.nextMessage(3, TimeUnit.SECONDS)); // subscribed
+        assertNotNull(client.nextMessage(3, TimeUnit.SECONDS)); // caught_up
+
+        // Active subscriber -> stream key is tracked
+        assertTrue(streamOffsets.containsKey(streamKey));
+
+        // Unsubscribe -> stream key removed
+        client.send("{\"op\":\"unsubscribe\",\"sessionId\":\"" + sessionId + "\"}");
+        org.testcontainers.shaded.org.awaitility.Awaitility.await()
+                .atMost(Duration.ofSeconds(3))
+                .until(() -> !streamOffsets.containsKey(streamKey));
+    }
+
+    @Test
+    void connectionCleanupRemovesFromConnectionsCancelsAuthTimeoutAndUnregistersSubscriptions() throws Exception {
+        UUID orgId = createTestOrg();
+        UUID userId = createTestUser(orgId, Role.OPERATOR);
+        UUID sessionId = createTestSession(orgId, userId);
+        String ticket = createWsTicket(userId, orgId, Role.OPERATOR, "Alice");
+
+        TestWsClient client = connectAndAuth(ticket);
+        client.nextMessage(3, TimeUnit.SECONDS); // auth_ok
+
+        client.send("{\"op\":\"subscribe\",\"sessionId\":\"" + sessionId + "\",\"fromSeq\":0}");
+        assertNotNull(client.nextMessage(3, TimeUnit.SECONDS)); // subscribed
+        assertNotNull(client.nextMessage(3, TimeUnit.SECONDS)); // caught_up
+
+        // Subscriber registered in RedisStreamListener
+        assertEquals(1, redisStreamListener.getSubscriberCount(sessionId));
+
+        java.lang.reflect.Field connMapField = HandOffWebSocketHandler.class.getDeclaredField("connections");
+        connMapField.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        ConcurrentHashMap<String, ?> connections =
+                (ConcurrentHashMap<String, ?>) connMapField.get(handOffWebSocketHandler);
+
+        assertFalse(connections.isEmpty());
+        String serverConnId = connections.keySet().iterator().next();
+        assertTrue(connections.containsKey(serverConnId));
+
+        // Close connection
+        client.close();
+
+        // Verify cleanup via afterConnectionClosed
+        org.testcontainers.shaded.org.awaitility.Awaitility.await()
+                .atMost(Duration.ofSeconds(3))
+                .until(() -> !connections.containsKey(serverConnId));
+
+        assertEquals(0, redisStreamListener.getSubscriberCount(sessionId));
+    }
+
+    // ==========================================
     // Helper Methods
     // ==========================================
 
@@ -1210,6 +1429,10 @@ public class WebSocketIntegrationTest extends AbstractIntegrationTest {
                 return null;
             }
             return mapper.readTree(raw);
+        }
+
+        public String getId() {
+            return session != null ? session.getId() : null;
         }
 
         public boolean isOpen() {
