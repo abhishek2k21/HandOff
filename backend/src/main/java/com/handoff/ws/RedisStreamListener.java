@@ -71,17 +71,37 @@ public class RedisStreamListener implements Runnable {
         }
     }
 
-    public void register(SessionSubscription sub) {
-        UUID sessionId = sub.getSessionId();
+    public boolean tryRegister(SessionSubscription newSub, SessionSubscription oldSubToReplace, int maxLimit) {
+        UUID sessionId = newSub.getSessionId();
+        java.util.concurrent.atomic.AtomicBoolean registered = new java.util.concurrent.atomic.AtomicBoolean(false);
         sessionSubscribers.compute(sessionId, (id, currentSubs) -> {
             Set<SessionSubscription> set = currentSubs != null ? currentSubs : ConcurrentHashMap.newKeySet();
-            set.add(sub);
-            return set;
+            if (oldSubToReplace != null) {
+                set.remove(oldSubToReplace);
+            }
+            if (set.size() < maxLimit || set.contains(newSub)) {
+                set.add(newSub);
+                registered.set(true);
+                return set;
+            }
+            // At limit: re-instate oldSub if it was removed
+            if (oldSubToReplace != null) {
+                set.add(oldSubToReplace);
+            }
+            // If the set is empty, return null so we don't leave an empty set in the map
+            return set.isEmpty() ? null : set;
         });
 
-        String streamKey = RedisStreamPublisher.getStreamKey(sessionId);
-        // Start newly activated stream from "0-0" and rely on seq de-duplication
-        streamOffsets.putIfAbsent(streamKey, "0-0");
+        if (registered.get()) {
+            String streamKey = RedisStreamPublisher.getStreamKey(sessionId);
+            // Start newly activated stream from "0-0" and rely on seq de-duplication
+            streamOffsets.putIfAbsent(streamKey, "0-0");
+        }
+        return registered.get();
+    }
+
+    public void register(SessionSubscription sub) {
+        tryRegister(sub, null, Integer.MAX_VALUE);
     }
 
     public void unregister(SessionSubscription sub) {
@@ -95,6 +115,11 @@ public class RedisStreamListener implements Runnable {
             }
             return currentSubs;
         });
+    }
+
+    public int getSubscriberCount(UUID sessionId) {
+        Set<SessionSubscription> subs = sessionSubscribers.get(sessionId);
+        return subs != null ? subs.size() : 0;
     }
 
     public Map<UUID, List<SessionSubscription>> getActiveSubscriptionsSnapshot() {

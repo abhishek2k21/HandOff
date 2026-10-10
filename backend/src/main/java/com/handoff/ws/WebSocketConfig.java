@@ -28,7 +28,7 @@ public class WebSocketConfig implements WebSocketConfigurer {
 
     public WebSocketConfig(
             HandOffWebSocketHandler handOffWebSocketHandler,
-            @Value("${handoff.ws.allowed-origins:*}") String allowedOriginsStr
+            @Value("${handoff.ws.allowed-origins:http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173}") String allowedOriginsStr
     ) {
         this.handOffWebSocketHandler = handOffWebSocketHandler;
         this.allowedOrigins = Arrays.stream(allowedOriginsStr.split(","))

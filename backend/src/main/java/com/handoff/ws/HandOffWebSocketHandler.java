@@ -48,6 +48,7 @@ public class HandOffWebSocketHandler extends TextWebSocketHandler {
     public static final CloseStatus STATUS_UNAUTHENTICATED = new CloseStatus(4401, "Unauthenticated");
     public static final CloseStatus STATUS_MESSAGE_TOO_BIG = new CloseStatus(1009, "Message too big");
     public static final CloseStatus STATUS_SLOW_CONSUMER = new CloseStatus(4420, "Slow consumer buffer overflow");
+    public static final CloseStatus STATUS_HEARTBEAT_TIMEOUT = new CloseStatus(4409, "Heartbeat timeout");
 
     private final WsTicketService wsTicketService;
     private final EventStore eventStore;
@@ -55,13 +56,27 @@ public class HandOffWebSocketHandler extends TextWebSocketHandler {
     private final RedisStreamListener redisStreamListener;
     private final ObjectMapper objectMapper;
     private volatile long authTimeoutSeconds;
+    private volatile long pingIntervalMs;
+    private volatile long pongTimeoutMs;
+    private volatile long heartbeatTickMs;
+    private volatile int maxSubscriptionsPerConnection;
+    private volatile int maxSubscribersPerSession;
 
     public void setAuthTimeoutSeconds(long authTimeoutSeconds) {
         this.authTimeoutSeconds = authTimeoutSeconds;
     }
 
+    public void setMaxSubscriptionsPerConnection(int max) {
+        this.maxSubscriptionsPerConnection = max;
+    }
+
+    public void setMaxSubscribersPerSession(int max) {
+        this.maxSubscribersPerSession = max;
+    }
+
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
     private final Executor subscriptionExecutor = Executors.newVirtualThreadPerTaskExecutor();
+    private final ScheduledFuture<?> heartbeatFuture;
 
     // Connection tracking
     private final ConcurrentHashMap<String, ConnectionState> connections = new ConcurrentHashMap<>();
@@ -87,6 +102,9 @@ public class HandOffWebSocketHandler extends TextWebSocketHandler {
         final ConcurrentWebSocketSessionDecorator session;
         final ScheduledFuture<?> authTimeoutTask;
         volatile WsTicketPayload user;
+        volatile long lastPingAt = 0;
+        volatile long pendingPongSince = 0;
+        final java.util.concurrent.atomic.AtomicBoolean closing = new java.util.concurrent.atomic.AtomicBoolean(false);
         final ConcurrentHashMap<UUID, SessionSubscription> subscriptions = new ConcurrentHashMap<>();
         final ConcurrentHashMap<UUID, AtomicLong> sessionGenerations = new ConcurrentHashMap<>();
         final AtomicLong generationCounter = new AtomicLong(0);
@@ -103,7 +121,12 @@ public class HandOffWebSocketHandler extends TextWebSocketHandler {
             SessionRepository sessionRepository,
             RedisStreamListener redisStreamListener,
             ObjectMapper objectMapper,
-            @Value("${handoff.ws.auth-timeout-seconds:5}") long authTimeoutSeconds
+            @Value("${handoff.ws.auth-timeout-seconds:5}") long authTimeoutSeconds,
+            @Value("${handoff.ws.ping-interval-ms:15000}") long pingIntervalMs,
+            @Value("${handoff.ws.pong-timeout-ms:10000}") long pongTimeoutMs,
+            @Value("${handoff.ws.heartbeat-tick-ms:1000}") long heartbeatTickMs,
+            @Value("${handoff.ws.max-subscriptions-per-connection:20}") int maxSubscriptionsPerConnection,
+            @Value("${handoff.ws.max-subscribers-per-session:200}") int maxSubscribersPerSession
     ) {
         this.wsTicketService = wsTicketService;
         this.eventStore = eventStore;
@@ -111,6 +134,60 @@ public class HandOffWebSocketHandler extends TextWebSocketHandler {
         this.redisStreamListener = redisStreamListener;
         this.objectMapper = objectMapper;
         this.authTimeoutSeconds = authTimeoutSeconds;
+        this.pingIntervalMs = pingIntervalMs;
+        this.pongTimeoutMs = pongTimeoutMs;
+        this.heartbeatTickMs = heartbeatTickMs;
+        this.maxSubscriptionsPerConnection = maxSubscriptionsPerConnection;
+        this.maxSubscribersPerSession = maxSubscribersPerSession;
+
+        this.heartbeatFuture = this.scheduler.scheduleWithFixedDelay(
+                this::heartbeatTick,
+                heartbeatTickMs,
+                heartbeatTickMs,
+                TimeUnit.MILLISECONDS
+        );
+    }
+
+    @jakarta.annotation.PreDestroy
+    public void destroy() {
+        if (heartbeatFuture != null) {
+            heartbeatFuture.cancel(false);
+        }
+        scheduler.shutdown();
+    }
+
+    private void heartbeatTick() {
+        long now = System.currentTimeMillis();
+        for (ConnectionState state : connections.values()) {
+            if (state.user == null || state.closing.get()) {
+                continue;
+            }
+            if (state.pendingPongSince != 0) {
+                if (now - state.pendingPongSince > pongTimeoutMs) {
+                    if (state.closing.compareAndSet(false, true)) {
+                        subscriptionExecutor.execute(() -> {
+                            try {
+                                state.session.close(STATUS_HEARTBEAT_TIMEOUT);
+                            } catch (IOException ignored) {}
+                        });
+                    }
+                }
+            } else if (now - state.lastPingAt >= pingIntervalMs) {
+                state.lastPingAt = now;
+                state.pendingPongSince = now;
+                subscriptionExecutor.execute(() -> {
+                    try {
+                        sendMessage(state.session, new WsMessage.PingMessage());
+                    } catch (Exception ex) {
+                        if (state.closing.compareAndSet(false, true)) {
+                            try {
+                                state.session.close(CloseStatus.SERVER_ERROR);
+                            } catch (IOException ignored) {}
+                        }
+                    }
+                });
+            }
+        }
     }
 
     @Override
@@ -215,6 +292,9 @@ public class HandOffWebSocketHandler extends TextWebSocketHandler {
         }
 
         state.user = payload;
+        long now = System.currentTimeMillis();
+        state.lastPingAt = now;
+        state.pendingPongSince = 0;
         log.info("WebSocket authenticated: connId={}, userId={}, role={}", state.session.getId(), payload.userId(), payload.role());
 
         WsMessage.AuthOkUser userDto = new WsMessage.AuthOkUser(payload.userId(), payload.role().name(), payload.name());
@@ -249,9 +329,9 @@ public class HandOffWebSocketHandler extends TextWebSocketHandler {
         }
 
         // Verify max subscriptions per connection (docs/events.md section 16: max 20)
-        if (!state.subscriptions.containsKey(sessionId) && state.subscriptions.size() >= 20) {
-            sendError(state.session, null, "RATE_LIMITED",
-                    "Maximum subscriptions per connection (20) reached", null);
+        if (!state.subscriptions.containsKey(sessionId) && state.subscriptions.size() >= maxSubscriptionsPerConnection) {
+            sendError(state.session, null, "VALIDATION_FAILED",
+                    "Maximum subscriptions per connection (" + maxSubscriptionsPerConnection + ") reached", null);
             return;
         }
 
@@ -280,13 +360,18 @@ public class HandOffWebSocketHandler extends TextWebSocketHandler {
         newSub.testHookBeforeHistoryRead = this.testHookBeforeHistoryRead;
         newSub.testHookBeforeBufferFlush = this.testHookBeforeBufferFlush;
 
-        SessionSubscription oldSub = state.subscriptions.put(sessionId, newSub);
-        if (oldSub != null) {
-            oldSub.cancel();
-            redisStreamListener.unregister(oldSub);
+        SessionSubscription oldSub = state.subscriptions.get(sessionId);
+        boolean registered = redisStreamListener.tryRegister(newSub, oldSub, maxSubscribersPerSession);
+        if (!registered) {
+            sendError(state.session, null, "RATE_LIMITED",
+                    "Maximum subscribers per session (" + maxSubscribersPerSession + ") reached", null);
+            return;
         }
 
-        redisStreamListener.register(newSub);
+        state.subscriptions.put(sessionId, newSub);
+        if (oldSub != null) {
+            oldSub.cancel();
+        }
 
         if (testHookAfterRegistrationBeforeReaderActivation != null) {
             testHookAfterRegistrationBeforeReaderActivation.run();
@@ -309,7 +394,7 @@ public class HandOffWebSocketHandler extends TextWebSocketHandler {
     }
 
     private void handlePong(ConnectionState state) {
-        // Pong received from client
+        state.pendingPongSince = 0;
     }
 
     private void handleCommand(ConnectionState state, JsonNode root) throws IOException {

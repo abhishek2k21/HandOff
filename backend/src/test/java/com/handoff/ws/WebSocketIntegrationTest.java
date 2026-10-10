@@ -115,11 +115,16 @@ public class WebSocketIntegrationTest extends AbstractIntegrationTest {
     @Autowired
     private RedisStreamPublisher redisStreamPublisher;
 
+    @Autowired
+    private RedisStreamListener redisStreamListener;
+
     private final List<TestWsClient> openClients = Collections.synchronizedList(new ArrayList<>());
 
     @BeforeEach
     void setUp() {
         handOffWebSocketHandler.setAuthTimeoutSeconds(5);
+        handOffWebSocketHandler.setMaxSubscriptionsPerConnection(20);
+        handOffWebSocketHandler.setMaxSubscribersPerSession(200);
         handOffWebSocketHandler.setTestHookAfterRegistrationBeforeReaderActivation(null);
         handOffWebSocketHandler.setTestHookBeforeHistoryRead(null);
         handOffWebSocketHandler.setTestHookBeforeBufferFlush(null);
@@ -129,6 +134,8 @@ public class WebSocketIntegrationTest extends AbstractIntegrationTest {
 
     @AfterEach
     void tearDown() {
+        handOffWebSocketHandler.setMaxSubscriptionsPerConnection(20);
+        handOffWebSocketHandler.setMaxSubscribersPerSession(200);
         redisStreamPublisher.setTestDropFilter(null);
         for (TestWsClient client : openClients) {
             client.close();
@@ -675,7 +682,7 @@ public class WebSocketIntegrationTest extends AbstractIntegrationTest {
     }
 
     @Test
-    void exceedingMaxSubscriptionsPerConnectionReturnsRateLimited() throws Exception {
+    void exceedingMaxSubscriptionsPerConnectionReturnsValidationFailed() throws Exception {
         UUID orgId = createTestOrg();
         UUID userId = createTestUser(orgId, Role.OPERATOR);
         String ticket = createWsTicket(userId, orgId, Role.OPERATOR, "Alice");
@@ -691,13 +698,102 @@ public class WebSocketIntegrationTest extends AbstractIntegrationTest {
             client.nextMessage(3, TimeUnit.SECONDS); // caught_up
         }
 
-        // 21st subscription should fail with RATE_LIMITED
+        // 21st subscription should fail with VALIDATION_FAILED
         UUID sid21 = createTestSession(orgId, userId);
         client.send("{\"op\":\"subscribe\",\"sessionId\":\"" + sid21 + "\",\"fromSeq\":0}");
         JsonNode err = client.nextMessage(3, TimeUnit.SECONDS);
         assertNotNull(err);
         assertEquals("error", err.get("op").asText());
-        assertEquals("RATE_LIMITED", err.get("code").asText());
+        assertEquals("VALIDATION_FAILED", err.get("code").asText());
+        assertTrue(client.isOpen());
+    }
+
+    @Test
+    void exceedingMaxSubscribersPerSessionReturnsRateLimited() throws Exception {
+        UUID orgId = createTestOrg();
+        UUID sid = createTestSession(orgId, createTestUser(orgId, Role.OPERATOR));
+
+        handOffWebSocketHandler.setMaxSubscribersPerSession(3);
+        try {
+            for (int i = 1; i <= 3; i++) {
+                UUID u = createTestUser(orgId, Role.OPERATOR);
+                String t = createWsTicket(u, orgId, Role.OPERATOR, "Op " + i);
+                TestWsClient c = connectAndAuth(t);
+                c.nextMessage(3, TimeUnit.SECONDS); // auth_ok
+                c.send("{\"op\":\"subscribe\",\"sessionId\":\"" + sid + "\",\"fromSeq\":0}");
+                assertNotNull(c.nextMessage(3, TimeUnit.SECONDS)); // subscribed
+                assertNotNull(c.nextMessage(3, TimeUnit.SECONDS)); // caught_up
+            }
+
+            // 4th subscriber exceeds max=3 -> RATE_LIMITED
+            UUID u4 = createTestUser(orgId, Role.OPERATOR);
+            String t4 = createWsTicket(u4, orgId, Role.OPERATOR, "Op 4");
+            TestWsClient c4 = connectAndAuth(t4);
+            c4.nextMessage(3, TimeUnit.SECONDS); // auth_ok
+            c4.send("{\"op\":\"subscribe\",\"sessionId\":\"" + sid + "\",\"fromSeq\":0}");
+            JsonNode err = c4.nextMessage(3, TimeUnit.SECONDS);
+            assertNotNull(err);
+            assertEquals("error", err.get("op").asText());
+            assertEquals("RATE_LIMITED", err.get("code").asText());
+            assertTrue(c4.isOpen());
+        } finally {
+            handOffWebSocketHandler.setMaxSubscribersPerSession(200);
+        }
+    }
+
+    @Test
+    void sessionLimitUnsubscribeAndDisconnectFreesSlotAndResubscribeDoesNotDoubleCount() throws Exception {
+        UUID orgId = createTestOrg();
+        UUID sid = createTestSession(orgId, createTestUser(orgId, Role.OPERATOR));
+
+        handOffWebSocketHandler.setMaxSubscribersPerSession(3);
+        try {
+            List<TestWsClient> clients = new ArrayList<>();
+            for (int i = 1; i <= 3; i++) {
+                UUID u = createTestUser(orgId, Role.OPERATOR);
+                String t = createWsTicket(u, orgId, Role.OPERATOR, "Op " + i);
+                TestWsClient c = connectAndAuth(t);
+                c.nextMessage(3, TimeUnit.SECONDS); // auth_ok
+                c.send("{\"op\":\"subscribe\",\"sessionId\":\"" + sid + "\",\"fromSeq\":0}");
+                assertNotNull(c.nextMessage(3, TimeUnit.SECONDS)); // subscribed
+                assertNotNull(c.nextMessage(3, TimeUnit.SECONDS)); // caught_up
+                clients.add(c);
+            }
+
+            // Client 1 re-subscribes to same session -> does NOT count twice
+            clients.get(0).send("{\"op\":\"subscribe\",\"sessionId\":\"" + sid + "\",\"fromSeq\":0}");
+            assertNotNull(clients.get(0).nextMessage(3, TimeUnit.SECONDS)); // subscribed
+            assertNotNull(clients.get(0).nextMessage(3, TimeUnit.SECONDS)); // caught_up
+
+            // Client 2 unsubscribes -> frees 1 slot
+            clients.get(1).send("{\"op\":\"unsubscribe\",\"sessionId\":\"" + sid + "\"}");
+
+            // Client 4 can now subscribe
+            UUID u4 = createTestUser(orgId, Role.OPERATOR);
+            String t4 = createWsTicket(u4, orgId, Role.OPERATOR, "Op 4");
+            TestWsClient c4 = connectAndAuth(t4);
+            c4.nextMessage(3, TimeUnit.SECONDS); // auth_ok
+            c4.send("{\"op\":\"subscribe\",\"sessionId\":\"" + sid + "\",\"fromSeq\":0}");
+            assertNotNull(c4.nextMessage(3, TimeUnit.SECONDS)); // subscribed
+            assertNotNull(c4.nextMessage(3, TimeUnit.SECONDS)); // caught_up
+
+            // Client 3 closes connection -> frees 1 slot
+            clients.get(2).close();
+            org.testcontainers.shaded.org.awaitility.Awaitility.await()
+                    .atMost(Duration.ofSeconds(3))
+                    .until(() -> redisStreamListener.getSubscriberCount(sid) == 2);
+
+            // Client 5 can now subscribe
+            UUID u5 = createTestUser(orgId, Role.OPERATOR);
+            String t5 = createWsTicket(u5, orgId, Role.OPERATOR, "Op 5");
+            TestWsClient c5 = connectAndAuth(t5);
+            c5.nextMessage(3, TimeUnit.SECONDS); // auth_ok
+            c5.send("{\"op\":\"subscribe\",\"sessionId\":\"" + sid + "\",\"fromSeq\":0}");
+            assertNotNull(c5.nextMessage(3, TimeUnit.SECONDS)); // subscribed
+            assertNotNull(c5.nextMessage(3, TimeUnit.SECONDS)); // caught_up
+        } finally {
+            handOffWebSocketHandler.setMaxSubscribersPerSession(200);
+        }
     }
 
     @Test
@@ -1114,6 +1210,10 @@ public class WebSocketIntegrationTest extends AbstractIntegrationTest {
                 return null;
             }
             return mapper.readTree(raw);
+        }
+
+        public boolean isOpen() {
+            return session != null && session.isOpen();
         }
 
         public void close() {
