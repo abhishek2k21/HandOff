@@ -64,4 +64,40 @@ class SessionSubscriptionTest {
         verifyNoInteractions(eventStore);
         assertEquals(0L, sub.getLastSentSeq());
     }
+
+    @Test
+    void unregisterTwiceDoesNotCorruptSubscriberCount() {
+        org.springframework.data.redis.connection.RedisConnectionFactory connectionFactory =
+                mock(org.springframework.data.redis.connection.RedisConnectionFactory.class);
+        ObjectMapper objectMapper = new ObjectMapper();
+        RedisStreamListener listener = new RedisStreamListener(connectionFactory, objectMapper);
+
+        UUID sessionId = UUID.randomUUID();
+        SessionSubscription sub1 = mock(SessionSubscription.class);
+        when(sub1.getSessionId()).thenReturn(sessionId);
+
+        SessionSubscription sub2 = mock(SessionSubscription.class);
+        when(sub2.getSessionId()).thenReturn(sessionId);
+
+        // Register both subscriptions
+        listener.register(sub1);
+        listener.register(sub2);
+        assertEquals(2, listener.getSubscriberCount(sessionId));
+
+        // Unregister sub1 first time
+        listener.unregister(sub1);
+        assertEquals(1, listener.getSubscriberCount(sessionId));
+
+        // Unregister sub1 second time (duplicate call) -> count remains 1, not decremented or corrupted
+        listener.unregister(sub1);
+        assertEquals(1, listener.getSubscriberCount(sessionId));
+
+        // Unregister sub2
+        listener.unregister(sub2);
+        assertEquals(0, listener.getSubscriberCount(sessionId));
+
+        // Unregister sub2 second time -> count remains 0
+        listener.unregister(sub2);
+        assertEquals(0, listener.getSubscriberCount(sessionId));
+    }
 }

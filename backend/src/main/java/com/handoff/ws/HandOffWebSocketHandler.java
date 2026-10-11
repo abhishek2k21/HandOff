@@ -519,6 +519,9 @@ public class HandOffWebSocketHandler extends TextWebSocketHandler {
             log.warn("SessionLimitExceededException sending to conn {}. Closing delegate with 4420.", session.getId());
             closeSlowConsumer(session);
             throw ex;
+        } catch (IllegalStateException ex) {
+            log.info("Send failed, connection already closed for conn {}.", session.getId());
+            throw ex;
         }
     }
 }

@@ -138,6 +138,10 @@ public class SessionSubscription {
         return state;
     }
 
+    public boolean isCancelled() {
+        return state == State.CANCELLED;
+    }
+
     /**
      * Atomically cancels this subscription.
      */
@@ -319,9 +323,14 @@ public class SessionSubscription {
                 lock.unlock();
             }
         } catch (SessionLimitExceededException ex) {
-            log.warn("Session limit exceeded while draining live queue for session {} conn {}. Closing 4420.",
+            log.warn("SessionLimitExceededException while draining live queue for session {} conn {}. Closing 4420.",
                     sessionId, session.getId());
             closeSlowConsumer();
+        } catch (IllegalStateException ex) {
+            log.info("Send failed, connection already closed while draining live queue for session {} conn {}.",
+                    sessionId, session.getId());
+            cancel();
+            streamListener.unregister(this);
         } catch (Exception ex) {
             log.error("Error draining live queue for session {} conn {}. Closing 4420.", sessionId, session.getId(), ex);
             closeSlowConsumer();
@@ -355,6 +364,11 @@ public class SessionSubscription {
                 log.warn("Session limit exceeded during reconciliation catch-up for session {} conn {}. Closing 4420.",
                         sessionId, session.getId());
                 closeSlowConsumer();
+            } catch (IllegalStateException ex) {
+                log.info("Send failed, connection already closed during reconciliation catch-up for session {} conn {}.",
+                        sessionId, session.getId());
+                cancel();
+                streamListener.unregister(this);
             } catch (Exception ex) {
                 log.error("Error during reconciliation catch-up for session {} conn {}. Closing 4420.",
                         sessionId, session.getId(), ex);
@@ -440,9 +454,10 @@ public class SessionSubscription {
             closeSlowConsumer();
             throw ex;
         } catch (IllegalStateException ex) {
-            log.warn("Endpoint write error for session {} conn {}. Closing delegate with 4420.",
+            log.info("Send failed, connection already closed for session {} conn {}.",
                     sessionId, session.getId());
-            closeSlowConsumer();
+            cancel();
+            streamListener.unregister(this);
             throw ex;
         }
     }

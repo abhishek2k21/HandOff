@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -962,6 +963,75 @@ public class WebSocketIntegrationTest extends AbstractIntegrationTest {
         } finally {
             handOffWebSocketHandler.setMaxSubscribersPerSession(200);
             ((com.handoff.events.JdbcEventStore) eventStore).setTestGetEventsException(null);
+        }
+    }
+
+    @Test
+    void sendToClosedConnectionDoesNotCloseWith4420AndCancelsSubscription() throws Exception {
+        UUID orgId = createTestOrg();
+        UUID userId = createTestUser(orgId, Role.OPERATOR);
+        UUID sessionId = createTestSession(orgId, userId);
+        String ticket = createWsTicket(userId, orgId, Role.OPERATOR, "Alice");
+
+        AtomicBoolean closeWith4420Attempted = new AtomicBoolean(false);
+        AtomicBoolean throwIllegalState = new AtomicBoolean(false);
+
+        handOffWebSocketHandler.setTestHookRawSessionDecorator(raw -> new WebSocketSessionDecorator(raw) {
+            @Override
+            public void sendMessage(WebSocketMessage<?> message) throws IOException {
+                if (throwIllegalState.get()) {
+                    throw new IllegalStateException("The remote endpoint was in state [CLOSED]");
+                }
+                super.sendMessage(message);
+            }
+
+            @Override
+            public void close(CloseStatus status) throws IOException {
+                if (status.getCode() == 4420) {
+                    closeWith4420Attempted.set(true);
+                }
+                super.close(status);
+            }
+        });
+
+        try {
+            TestWsClient client = connectAndAuth(ticket);
+            client.nextMessage(3, TimeUnit.SECONDS); // auth_ok
+
+            client.send("{\"op\":\"subscribe\",\"sessionId\":\"" + sessionId + "\",\"fromSeq\":0}");
+            assertNotNull(client.nextMessage(3, TimeUnit.SECONDS)); // subscribed
+            assertNotNull(client.nextMessage(3, TimeUnit.SECONDS)); // caught_up
+
+            SessionSubscription sub = handOffWebSocketHandler.getSubscriptionForSession(sessionId);
+            assertNotNull(sub);
+            assertEquals(1, redisStreamListener.getSubscriberCount(sessionId));
+
+            // Socket is closed / throws IllegalStateException on write
+            throwIllegalState.set(true);
+
+            // Attempt to send on closed session
+            Event ev = new Event(
+                    sessionId,
+                    1L,
+                    "AGENT_TEXT",
+                    new Actor(ActorKind.AGENT, "agent", "Agent"),
+                    null,
+                    Map.of("text", "hello"),
+                    java.time.Instant.now()
+            );
+
+            assertThrows(IllegalStateException.class, () ->
+                    sub.sendMessage(new WsMessage.LiveEventResponse(ev))
+            );
+
+            // Assert: NO 4420 close was attempted!
+            assertFalse(closeWith4420Attempted.get(), "4420 close must NOT be attempted on already-closed connection");
+
+            // Subscription must be cancelled and unregistered (slot freed)
+            assertTrue(sub.isCancelled(), "Subscription must be cancelled");
+            assertEquals(0, redisStreamListener.getSubscriberCount(sessionId), "Subscriber slot must be freed");
+        } finally {
+            handOffWebSocketHandler.setTestHookRawSessionDecorator(null);
         }
     }
 
