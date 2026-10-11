@@ -689,6 +689,77 @@ public class WebSocketIntegrationTest extends AbstractIntegrationTest {
     }
 
     @Test
+    void messageOfExactly16384BytesIsAcceptedAndConnectionStaysOpen() throws Exception {
+        UUID orgId = createTestOrg();
+        UUID userId = createTestUser(orgId, Role.OPERATOR);
+        String ticket = createWsTicket(userId, orgId, Role.OPERATOR, "Alice");
+
+        TestWsClient client = connectAndAuth(ticket);
+        client.nextMessage(3, TimeUnit.SECONDS); // auth_ok
+
+        // Construct valid JSON message of exactly 16384 bytes
+        String prefix = "{\"op\":\"pong\",\"padding\":\"";
+        String suffix = "\"}";
+        int paddingLen = 16384 - prefix.length() - suffix.length();
+        String exact16KB = prefix + "x".repeat(paddingLen) + suffix;
+        assertEquals(16384, exact16KB.getBytes(StandardCharsets.UTF_8).length);
+
+        client.send(exact16KB);
+
+        // Verify connection stays open by subscribing to a session and receiving subscribed message
+        UUID sessionId = createTestSession(orgId, userId);
+        client.send("{\"op\":\"subscribe\",\"sessionId\":\"" + sessionId + "\",\"fromSeq\":0}");
+        JsonNode subResp = client.nextMessage(3, TimeUnit.SECONDS);
+        assertNotNull(subResp, "Connection must remain open and process subsequent messages");
+        assertEquals("subscribed", subResp.get("op").asText());
+        assertFalse(client.closeFuture.isDone(), "Connection must not be closed");
+    }
+
+    @Test
+    void messageOf20KBClosesWith1009() throws Exception {
+        UUID orgId = createTestOrg();
+        UUID userId = createTestUser(orgId, Role.OPERATOR);
+        String ticket = createWsTicket(userId, orgId, Role.OPERATOR, "Alice");
+
+        TestWsClient client = connectAndAuth(ticket);
+        client.nextMessage(3, TimeUnit.SECONDS); // auth_ok
+
+        // Send payload of 20 KB (20480 bytes)
+        String prefix = "{\"op\":\"pong\",\"padding\":\"";
+        String suffix = "\"}";
+        int targetBytes = 20 * 1024;
+        String msg20KB = prefix + "x".repeat(targetBytes - prefix.length() - suffix.length()) + suffix;
+        client.send(msg20KB);
+
+        CloseStatus closeStatus = client.closeFuture.get(5, TimeUnit.SECONDS);
+        assertEquals(1009, closeStatus.getCode(), "20 KB message must close with 1009");
+    }
+
+    @Test
+    void messageOf600KBClosesWith1009() throws Exception {
+        UUID orgId = createTestOrg();
+        UUID userId = createTestUser(orgId, Role.OPERATOR);
+        String ticket = createWsTicket(userId, orgId, Role.OPERATOR, "Alice");
+
+        TestWsClient client = connectAndAuth(ticket);
+        client.nextMessage(3, TimeUnit.SECONDS); // auth_ok
+
+        // Send payload of 600 KB (614400 bytes)
+        String prefix = "{\"op\":\"pong\",\"padding\":\"";
+        String suffix = "\"}";
+        int targetBytes = 600 * 1024;
+        String msg600KB = prefix + "x".repeat(targetBytes - prefix.length() - suffix.length()) + suffix;
+        try {
+            client.send(msg600KB);
+        } catch (Exception ignored) {
+            // Server closes connection with 1009 when message exceeds buffer, which may abort client write
+        }
+
+        CloseStatus closeStatus = client.closeFuture.get(5, TimeUnit.SECONDS);
+        assertEquals(1009, closeStatus.getCode(), "600 KB message must close with 1009");
+    }
+
+    @Test
     void missingOriginHeaderIsAllowed() throws Exception {
         UUID orgId = createTestOrg();
         UUID userId = createTestUser(orgId, Role.VIEWER);
@@ -1622,8 +1693,8 @@ public class WebSocketIntegrationTest extends AbstractIntegrationTest {
 
         public TestWsClient(int port, WebSocketHttpHeaders customHeaders) throws Exception {
             jakarta.websocket.WebSocketContainer container = jakarta.websocket.ContainerProvider.getWebSocketContainer();
-            container.setDefaultMaxTextMessageBufferSize(512 * 1024);
-            container.setDefaultMaxBinaryMessageBufferSize(512 * 1024);
+            container.setDefaultMaxTextMessageBufferSize(1024 * 1024);
+            container.setDefaultMaxBinaryMessageBufferSize(1024 * 1024);
             StandardWebSocketClient client = new StandardWebSocketClient(container);
             WebSocketHttpHeaders headers = customHeaders != null ? customHeaders : new WebSocketHttpHeaders();
             this.session = client.execute(new TextWebSocketHandler() {
