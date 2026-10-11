@@ -101,9 +101,15 @@ npm run build
 - **B1:** reconciliation job.
 - **B2:** limits, heartbeat (close code 4409), origin checks.
 - **B3:** hardening tests; the redis reader test uses a test hook that makes the reader throw once and never touches the shared Redis container.
-- **Totals:** 112 backend tests, 24 frontend tests.
+- **Review fixes before merge:** slow-consumer close now returns 4420 even when the Spring decorator limit is hit (decorator limit 1 MB, app cap 512 KB); a replay failure closes with 4500 and frees the subscriber slot; a write to an already-closed socket is no longer reported as a slow consumer.
+- **Totals:** 116 backend tests, 24 frontend tests.
 - **Live browser check passed:** joined a running LONG_STREAM, received seq 1 to 2003 with 0 duplicates, 0 out of order, 0 missing.
-- **Not done yet:** push, pull request, CI result, slice 4 (frontend WebSocket client).
+- **Merged:** pull request #3 into main (commit f5cfc3c), CI green.
+
+### Follow-ups (not in slice 3)
+- WebSocketConfig: set the inbound container buffer to the 16 KB protocol limit, not 512 KB (CodeRabbit comment, needs verifying).
+- Frontend: a transient refresh failure must not delete the stored refresh token (auth.ts); reset the session view on logout (App.tsx); SessionDetailPage should load all pages when hasMore is true; SessionsPage rows need keyboard access.
+- Run CodeRabbit with base main so it reviews only the new pull request.
 
 ---
 
