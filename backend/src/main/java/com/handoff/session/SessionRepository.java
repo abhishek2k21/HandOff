@@ -10,4 +10,5 @@ public interface SessionRepository {
     Optional<Session> findByIdWithoutOrg(UUID sessionId);
     List<Session> findAllByOrg(UUID orgId, int limit);
     boolean hasActiveSessionForTicket(UUID orgId, String ticketId);
+    java.util.Map<UUID, Long> findLastSeqsByIds(java.util.Collection<UUID> sessionIds);
 }

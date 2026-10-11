@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.handoff.common.ApiException;
 import com.handoff.session.SessionStatus;
 import com.handoff.session.SessionStatusReducer;
+import com.handoff.ws.RedisStreamPublisher;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
@@ -21,6 +22,8 @@ import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 @Repository
 public class JdbcEventStore implements EventStore {
@@ -30,12 +33,24 @@ public class JdbcEventStore implements EventStore {
     private final JdbcTemplate jdbc;
     private final ObjectMapper objectMapper;
     private final SessionStatusReducer sessionStatusReducer;
+    private final RedisStreamPublisher redisStreamPublisher;
     private final RowMapper<Event> eventRowMapper;
+    private volatile RuntimeException testGetEventsException = null;
 
-    public JdbcEventStore(JdbcTemplate jdbc, ObjectMapper objectMapper, SessionStatusReducer sessionStatusReducer) {
+    public void setTestGetEventsException(RuntimeException ex) {
+        this.testGetEventsException = ex;
+    }
+
+    public JdbcEventStore(
+            JdbcTemplate jdbc,
+            ObjectMapper objectMapper,
+            SessionStatusReducer sessionStatusReducer,
+            RedisStreamPublisher redisStreamPublisher
+    ) {
         this.jdbc = jdbc;
         this.objectMapper = objectMapper;
         this.sessionStatusReducer = sessionStatusReducer;
+        this.redisStreamPublisher = redisStreamPublisher;
         this.eventRowMapper = (ResultSet rs, int rowNum) -> {
             try {
                 String payloadJson = rs.getString("payload");
@@ -65,7 +80,7 @@ public class JdbcEventStore implements EventStore {
     }
 
     @Override
-    @Transactional
+    @Transactional(propagation = Propagation.MANDATORY)
     public Event append(
             UUID sessionId,
             String type,
@@ -154,11 +169,25 @@ public class JdbcEventStore implements EventStore {
         Instant createdAt = createdAtTs != null ? createdAtTs.toInstant() : Instant.now();
         Actor actor = new Actor(actorKind, actorId, actorName);
 
-        return new Event(sessionId, seq, type, actor, commandId, payload != null ? payload : Collections.emptyMap(), createdAt);
+        Event event = new Event(sessionId, seq, type, actor, commandId, payload != null ? payload : Collections.emptyMap(), createdAt);
+
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                redisStreamPublisher.publish(event);
+            }
+        });
+
+        return event;
     }
 
     @Override
     public List<Event> getEvents(UUID sessionId, long fromSeq, int limit) {
+        RuntimeException ex = testGetEventsException;
+        if (ex != null) {
+            testGetEventsException = null;
+            throw ex;
+        }
         String sql = """
             SELECT session_id, seq, type, actor_kind, actor_id, actor_name, command_id, payload, created_at
               FROM events
