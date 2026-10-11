@@ -454,6 +454,7 @@ CONNECTING -> AUTHENTICATING -> REPLAYING -> LIVE
 | 4500 | Internal server error (client should reconnect) |
 
 A client that cannot keep up is closed with 4420 on a live stream, including when the reconciliation job has to send it a large gap, and should reconnect and resubscribe from its last `seq`.
+An error during event replay from the database closes the connection with 4500; the client should reconnect and resubscribe.
 
 ---
 
