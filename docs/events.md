@@ -399,7 +399,7 @@ Server side, for each `subscribe(sessionId, fromSeq)`:
 1. Verify the user belongs to the session's organization and has at least VIEWER role.
 2. Reject with `INVALID_SEQUENCE` if `fromSeq` is greater than the session's `lastSeq`.
 3. Register the connection as a live subscriber and start buffering any new events for it.
-4. Read events with `seq > fromSeq` from PostgreSQL in batches of up to 500 and send them as `events` messages.
+4. Read events with `seq > fromSeq` from PostgreSQL in batches of up to 500 and send them as `events` messages. If `fromSeq == session.lastSeq`, the replay batch is empty; `subscribed` and `caught_up` are still sent with `lastSeq`, and no `events` message is sent.
 5. Send `subscribed` (before the first batch) and `caught_up` (after the last batch).
 6. Flush the buffered live events with `seq` greater than the last sent `seq`, in order, then continue live.
 7. For each connection track `lastSentSeq`. If a live event arrives with `seq > lastSentSeq + 1`, read the missing range from PostgreSQL first. Delivery order MUST always follow `seq`.
@@ -431,7 +431,7 @@ CONNECTING -> AUTHENTICATING -> REPLAYING -> LIVE
 
 ### 9.7 Heartbeat
 
-- The server sends `ping` every 15 seconds. The client replies `pong` within 10 seconds or the server closes the connection.
+- The server sends `ping` every 15 seconds. The client replies `pong` within 10 seconds or the server closes the connection with code 4409; the client should reconnect and re-subscribe from its last `seq`.
 - A `pong` from the controller renews the control lease (section 11).
 
 ### 9.8 Presence
@@ -444,11 +444,17 @@ CONNECTING -> AUTHENTICATING -> REPLAYING -> LIVE
 
 | Code | Meaning |
 |---|---|
+| 1009 | Message too big (payload exceeds 16 KB) |
 | 4401 | Unauthenticated (bad, expired, or reused ticket) |
 | 4403 | Forbidden (user removed from the organization or role revoked) |
 | 4408 | Authentication timeout |
+| 4409 | Heartbeat timeout (no pong received within 10 seconds) |
+| 4420 | Slow consumer buffer overflow |
 | 4429 | Rate limited |
 | 4500 | Internal server error (client should reconnect) |
+
+A client that cannot keep up is closed with 4420 on a live stream, including when the reconciliation job has to send it a large gap, and should reconnect and resubscribe from its last `seq`.
+An error during event replay from the database closes the connection with 4500; the client should reconnect and resubscribe.
 
 ---
 
@@ -878,6 +884,7 @@ Over WebSocket, the same codes appear in `error` messages. Failed commands never
 | Human comment | 1,000 characters |
 | Pause or resume reason, approval note, handoff note | 500 characters |
 | Replay batch | 500 events |
+| Subscriptions per connection | 20 |
 | Commands per user | 20 per 10 seconds |
 | Login attempts | 5 per minute per IP address |
 | WebSocket tickets | 10 per minute per user |

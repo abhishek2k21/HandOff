@@ -11,6 +11,7 @@ import {
 import type { Session, Ticket } from '../api/types';
 import { SessionDetailPage } from '../pages/SessionDetailPage';
 import { SessionsPage } from '../pages/SessionsPage';
+import { useAuthStore } from '../store/auth';
 
 vi.mock('../api/sessions', () => ({
   listSessions: vi.fn(),
@@ -83,6 +84,16 @@ const fakeSessions: Session[] = [
 describe('Sessions & Scripted Agent Components (Slice 2)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    useAuthStore.setState({
+      status: 'authenticated',
+      accessToken: 'valid-test-access-token',
+      user: {
+        id: 'u-1',
+        name: 'Test Operator',
+        role: 'OPERATOR',
+        organizationId: 'org-1',
+      },
+    });
   });
 
   afterEach(() => {
@@ -476,4 +487,65 @@ describe('Sessions & Scripted Agent Components (Slice 2)', () => {
       expect(screen.getByText(/testNumber/i)).toBeInTheDocument();
     });
   });
+
+  describe('Restored Session and Auth Flow', () => {
+    it('no protected call while status is "loading"', async () => {
+      useAuthStore.setState({
+        status: 'loading',
+        accessToken: null,
+        user: null,
+      });
+
+      render(<SessionsPage userRole="OPERATOR" onSelectSession={vi.fn()} />);
+
+      // Shows loading state
+      expect(screen.getByText(/loading sessions/i)).toBeInTheDocument();
+      // No calls made while status is loading
+      expect(mockListSessions).not.toHaveBeenCalled();
+      expect(mockGetTickets).not.toHaveBeenCalled();
+    });
+
+    it('calls happen after restore', async () => {
+      useAuthStore.setState({
+        status: 'loading',
+        accessToken: null,
+        user: null,
+      });
+
+      mockListSessions.mockResolvedValueOnce(fakeSessions);
+      mockGetTickets.mockResolvedValueOnce(fakeTickets);
+
+      render(<SessionsPage userRole="OPERATOR" onSelectSession={vi.fn()} />);
+
+      // Before restore: no protected calls
+      expect(mockListSessions).not.toHaveBeenCalled();
+      expect(mockGetTickets).not.toHaveBeenCalled();
+
+      // Session restores with authenticated status and access token
+      act(() => {
+        useAuthStore.setState({
+          status: 'authenticated',
+          accessToken: 'restored-access-token',
+          user: {
+            id: 'u-1',
+            name: 'Restored Operator',
+            role: 'OPERATOR',
+            organizationId: 'org-1',
+          },
+        });
+      });
+
+      // After restore: calls happen and sessions render
+      await waitFor(() => {
+        expect(mockListSessions).toHaveBeenCalledTimes(1);
+        expect(mockGetTickets).toHaveBeenCalledTimes(1);
+      });
+
+      await waitFor(() => {
+        expect(screen.getByText('T-101')).toBeInTheDocument();
+        expect(screen.getByText('T-102')).toBeInTheDocument();
+      });
+    });
+  });
 });
+

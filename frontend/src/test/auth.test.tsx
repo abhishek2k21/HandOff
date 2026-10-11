@@ -405,4 +405,70 @@ describe('Auth Integration and Unit Tests', () => {
     expect(refreshCalls).toBe(1);
     expect(authFailureCalled).toBe(true);
   });
+
+  // Test: a later 401 refreshes once and retries
+  it('a later 401 refreshes once and retries', async () => {
+    let callCount = 0;
+    let refreshCount = 0;
+    const initialToken = 'initial-access-token';
+    const newToken = 'refreshed-access-token';
+
+    let currentToken = initialToken;
+    configureAuthClient({
+      getAccessToken: () => currentToken,
+      onAuthFailure: vi.fn(),
+      refreshHandler: async () => {
+        refreshCount++;
+        currentToken = newToken;
+        return newToken;
+      },
+    });
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL, init) => {
+      const url = input.toString();
+      if (url.includes('/api/sessions?limit=50') || url.includes('/api/sessions')) {
+        callCount++;
+        const headers = init?.headers as Headers | undefined;
+        const authHeader = headers?.get?.('Authorization');
+
+        if (callCount === 1) {
+          // Initial call with expired token returns 401
+          return new Response(
+            JSON.stringify({
+              error: { code: 'UNAUTHENTICATED', message: 'Token expired' },
+            }),
+            { status: 401, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+
+        // Retry with refreshed token succeeds
+        expect(authHeader).toBe(`Bearer ${newToken}`);
+        return new Response(
+          JSON.stringify({
+            items: [
+              {
+                id: 's-1',
+                ticketId: 'T-101',
+                agentType: 'SCRIPTED',
+                scenario: 'SIMPLE_LOOKUP',
+                status: 'RUNNING',
+                lastSeq: 1,
+                createdAt: '2026-10-09T00:00:00Z',
+              },
+            ],
+            total: 1,
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return Promise.reject(new Error(`Unexpected call: ${url}`));
+    });
+
+    const result = await apiRequest<{ items: any[]; total: number }>('/api/sessions?limit=50');
+    expect(callCount).toBe(2);
+    expect(refreshCount).toBe(1);
+    expect(result.items.length).toBe(1);
+    expect(result.items[0].id).toBe('s-1');
+  });
 });
+

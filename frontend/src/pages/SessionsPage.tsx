@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { ApiError } from '../api/client';
 import { createSession, getTickets, listSessions } from '../api/sessions';
 import type { Role, Session, SessionStatus, Ticket } from '../api/types';
+import { useAuthStore } from '../store/auth';
 
 interface SessionsPageProps {
   userRole: Role;
@@ -9,6 +10,9 @@ interface SessionsPageProps {
 }
 
 export function SessionsPage({ userRole, onSelectSession }: SessionsPageProps) {
+  const authStatus = useAuthStore((s) => s.status);
+  const accessToken = useAuthStore((s) => s.accessToken);
+
   const [sessions, setSessions] = useState<Session[]>([]);
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [loading, setLoading] = useState(true);
@@ -21,8 +25,12 @@ export function SessionsPage({ userRole, onSelectSession }: SessionsPageProps) {
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
-  // Load initial sessions and tickets
+  // Load initial sessions and tickets only when auth store is authenticated with an access token
   useEffect(() => {
+    if (authStatus !== 'authenticated' || !accessToken) {
+      return;
+    }
+
     let cancelled = false;
 
     async function loadData() {
@@ -56,7 +64,7 @@ export function SessionsPage({ userRole, onSelectSession }: SessionsPageProps) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [authStatus, accessToken]);
 
   const safeSessions = Array.isArray(sessions) ? sessions : [];
   const safeTickets = Array.isArray(tickets) ? tickets : [];

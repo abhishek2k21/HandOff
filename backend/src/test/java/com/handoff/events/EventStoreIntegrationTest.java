@@ -35,6 +35,9 @@ class EventStoreIntegrationTest extends AbstractIntegrationTest {
     @Autowired
     private TransactionTemplate transactionTemplate;
 
+    @Autowired
+    private org.springframework.data.redis.core.StringRedisTemplate redisTemplate;
+
     @Test
     void t1_fiftyConcurrentThreadsProduceGaplessSequence() throws InterruptedException {
         UUID orgId = createTestOrg();
@@ -56,14 +59,16 @@ class EventStoreIntegrationTest extends AbstractIntegrationTest {
                 readyLatch.countDown();
                 try {
                     startLatch.await();
-                    Event event = eventStore.append(
-                            sessionId,
-                            "AGENT_TEXT",
-                            ActorKind.AGENT,
-                            "agent",
-                            "Agent",
-                            null,
-                            Map.of("messageId", "m-1", "text", "msg-" + index, "final", false)
+                    Event event = transactionTemplate.execute(status ->
+                            eventStore.append(
+                                    sessionId,
+                                    "AGENT_TEXT",
+                                    ActorKind.AGENT,
+                                    "agent",
+                                    "Agent",
+                                    null,
+                                    Map.of("messageId", "m-1", "text", "msg-" + index, "final", false)
+                            )
                     );
                     assignedSeqs.add(event.seq());
                 } catch (Throwable t) {
@@ -97,14 +102,16 @@ class EventStoreIntegrationTest extends AbstractIntegrationTest {
         UUID userId = createTestUser(orgId);
         UUID sessionId = createTestSession(orgId, userId);
 
-        Event event = eventStore.append(
-                sessionId,
-                "AGENT_TEXT",
-                ActorKind.AGENT,
-                "agent",
-                "Agent",
-                null,
-                Map.of("text", "immutable text")
+        Event event = transactionTemplate.execute(status ->
+                eventStore.append(
+                        sessionId,
+                        "AGENT_TEXT",
+                        ActorKind.AGENT,
+                        "agent",
+                        "Agent",
+                        null,
+                        Map.of("text", "immutable text")
+                )
         );
 
         DataAccessException updateEx = assertThrows(DataAccessException.class, () ->
@@ -121,20 +128,67 @@ class EventStoreIntegrationTest extends AbstractIntegrationTest {
     }
 
     @Test
+    void appendWithoutTransactionThrowsIllegalTransactionStateException() {
+        UUID orgId = createTestOrg();
+        UUID userId = createTestUser(orgId);
+        UUID sessionId = createTestSession(orgId, userId);
+
+        assertThrows(org.springframework.transaction.IllegalTransactionStateException.class, () ->
+                eventStore.append(
+                        sessionId,
+                        "AGENT_TEXT",
+                        ActorKind.AGENT,
+                        "agent",
+                        "Agent",
+                        null,
+                        Map.of("text", "no tx")
+                )
+        );
+    }
+
+    @Test
+    void rollbackPublishesNothingToRedisStream() {
+        UUID orgId = createTestOrg();
+        UUID userId = createTestUser(orgId);
+        UUID sessionId = createTestSession(orgId, userId);
+        String streamKey = "hg:s:" + sessionId + ":events";
+
+        assertThrows(RuntimeException.class, () ->
+                transactionTemplate.execute(status -> {
+                    eventStore.append(
+                            sessionId,
+                            "AGENT_TEXT",
+                            ActorKind.AGENT,
+                            "agent",
+                            "Agent",
+                            null,
+                            Map.of("text", "will rollback")
+                    );
+                    throw new RuntimeException("Forced rollback");
+                })
+        );
+
+        Long streamLen = redisTemplate.opsForStream().size(streamKey);
+        assertTrue(streamLen == null || streamLen == 0L, "Rolled-back transaction must publish nothing to Redis stream");
+    }
+
+    @Test
     void rollbackReleasesSequenceWithNoGaps() {
         UUID orgId = createTestOrg();
         UUID userId = createTestUser(orgId);
         UUID sessionId = createTestSession(orgId, userId);
 
         // Append seq 1 successfully
-        Event event1 = eventStore.append(
-                sessionId,
-                "AGENT_TEXT",
-                ActorKind.AGENT,
-                "agent",
-                "Agent",
-                null,
-                Map.of("text", "first")
+        Event event1 = transactionTemplate.execute(status ->
+                eventStore.append(
+                        sessionId,
+                        "AGENT_TEXT",
+                        ActorKind.AGENT,
+                        "agent",
+                        "Agent",
+                        null,
+                        Map.of("text", "first")
+                )
         );
         assertEquals(1L, event1.seq());
 
@@ -159,14 +213,16 @@ class EventStoreIntegrationTest extends AbstractIntegrationTest {
         assertEquals(1L, dbLastSeq);
 
         // Next successful append gets gapless seq 2
-        Event event2 = eventStore.append(
-                sessionId,
-                "AGENT_TEXT",
-                ActorKind.AGENT,
-                "agent",
-                "Agent",
-                null,
-                Map.of("text", "second")
+        Event event2 = transactionTemplate.execute(status ->
+                eventStore.append(
+                        sessionId,
+                        "AGENT_TEXT",
+                        ActorKind.AGENT,
+                        "agent",
+                        "Agent",
+                        null,
+                        Map.of("text", "second")
+                )
         );
         assertEquals(2L, event2.seq());
     }
@@ -177,26 +233,30 @@ class EventStoreIntegrationTest extends AbstractIntegrationTest {
         UUID userId = createTestUser(orgId);
         UUID sessionId = createTestSession(orgId, userId);
 
-        eventStore.append(
-                sessionId,
-                "SESSION_COMPLETED",
-                ActorKind.AGENT,
-                "agent",
-                "Agent",
-                null,
-                Map.of("outcome", "RESOLVED", "summary", "Done")
-        );
-
-        // Further append must fail with SESSION_ENDED (409)
-        ApiException ex = assertThrows(ApiException.class, () ->
+        transactionTemplate.execute(status ->
                 eventStore.append(
                         sessionId,
-                        "AGENT_TEXT",
+                        "SESSION_COMPLETED",
                         ActorKind.AGENT,
                         "agent",
                         "Agent",
                         null,
-                        Map.of("text", "after completed")
+                        Map.of("outcome", "RESOLVED", "summary", "Done")
+                )
+        );
+
+        // Further append must fail with SESSION_ENDED (409)
+        ApiException ex = assertThrows(ApiException.class, () ->
+                transactionTemplate.execute(status ->
+                        eventStore.append(
+                                sessionId,
+                                "AGENT_TEXT",
+                                ActorKind.AGENT,
+                                "agent",
+                                "Agent",
+                                null,
+                                Map.of("text", "after completed")
+                        )
                 )
         );
         assertEquals("SESSION_ENDED", ex.getCode());
@@ -213,14 +273,16 @@ class EventStoreIntegrationTest extends AbstractIntegrationTest {
         Map<String, Object> largePayload = Map.of("largeField", largeText);
 
         ApiException ex = assertThrows(ApiException.class, () ->
-                eventStore.append(
-                        sessionId,
-                        "AGENT_TEXT",
-                        ActorKind.AGENT,
-                        "agent",
-                        "Agent",
-                        null,
-                        largePayload
+                transactionTemplate.execute(status ->
+                        eventStore.append(
+                                sessionId,
+                                "AGENT_TEXT",
+                                ActorKind.AGENT,
+                                "agent",
+                                "Agent",
+                                null,
+                                largePayload
+                        )
                 )
         );
 

@@ -31,17 +31,20 @@ public class SessionService {
     private final TicketRepository ticketRepository;
     private final EventStore eventStore;
     private final AgentRunner agentRunner;
+    private final org.springframework.transaction.support.TransactionTemplate transactionTemplate;
 
     public SessionService(
             SessionRepository sessionRepository,
             TicketRepository ticketRepository,
             EventStore eventStore,
-            AgentRunner agentRunner
+            AgentRunner agentRunner,
+            org.springframework.transaction.support.TransactionTemplate transactionTemplate
     ) {
         this.sessionRepository = sessionRepository;
         this.ticketRepository = ticketRepository;
         this.eventStore = eventStore;
         this.agentRunner = agentRunner;
+        this.transactionTemplate = transactionTemplate;
     }
 
     /**
@@ -50,7 +53,8 @@ public class SessionService {
      */
     public SessionResponse createSession(UUID orgId, UUID userId, String userDisplayName, CreateSessionRequest req) {
         try {
-            return executeCreateSessionTransaction(orgId, userId, userDisplayName, req);
+            return transactionTemplate.execute(status ->
+                    executeCreateSessionTransaction(orgId, userId, userDisplayName, req));
         } catch (DataIntegrityViolationException e) {
             if (isTicketUniqueConstraintViolation(e)) {
                 log.info("Caught active session unique index violation for ticket {}", req.ticketId());
